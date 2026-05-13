@@ -10,6 +10,8 @@ from dotenv import load_dotenv
 from loguru import logger
 from openai import OpenAI
 
+from src.basic_agents.react_agent import _sanitize_text
+
 load_dotenv()
 
 __all__ = ["PlanExecuteAgent", "PlanStep", "StepStatus"]
@@ -233,6 +235,7 @@ class PlanExecuteAgent:
         Returns:
             执行结果汇总报告
         """
+        query = _sanitize_text(query)
         # 1. 创建计划
         self.create_plan(query)
         if not self.plan:

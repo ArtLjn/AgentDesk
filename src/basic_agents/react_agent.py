@@ -2,6 +2,7 @@
 
 import os
 import re
+from datetime import datetime
 from typing import Callable, Optional
 
 from dotenv import load_dotenv
@@ -11,6 +12,11 @@ from openai import OpenAI
 load_dotenv()
 
 __all__ = ["ReActAgent"]
+
+
+def _sanitize_text(text: str) -> str:
+    """清洗输入文本中的 UTF-8 代理字符，防止编码错误"""
+    return text.encode("utf-8", errors="surrogatepass").decode("utf-8", errors="replace")
 
 
 class ReActAgent:
@@ -30,6 +36,19 @@ class ReActAgent:
         self.conversation_history: list[dict] = []
         self.max_iterations = 10
 
+        self.system_prompt = """你是一个ReAct模式的AI助手，遵循以下思考流程：
+1. Thought: 思考当前问题需要做什么
+2. Action: 决定要调用的工具，格式为：Action: 工具名(参数)
+3. Observation: 工具返回的结果
+4. 重复上述步骤，直到你可以回答用户的问题
+
+当你确定可以回答问题时，使用格式：Final Answer: 你的回答
+
+重要：当前时间是 {current_time}，回答时请注意时间准确性。
+
+可用工具：
+{tools_description}"""
+
     @property
     def client(self) -> OpenAI:
         """延迟初始化 OpenAI 客户端，避免构造时就必须提供 API Key"""
@@ -39,17 +58,6 @@ class ReActAgent:
                 base_url=self._base_url or os.getenv("OPENAI_BASE_URL"),
             )
         return self._client
-
-        self.system_prompt = """你是一个ReAct模式的AI助手，遵循以下思考流程：
-1. Thought: 思考当前问题需要做什么
-2. Action: 决定要调用的工具，格式为：Action: 工具名(参数)
-3. Observation: 工具返回的结果
-4. 重复上述步骤，直到你可以回答用户的问题
-
-当你确定可以回答问题时，使用格式：Final Answer: 你的回答
-
-可用工具：
-{tools_description}"""
 
     def register_tool(self, name: str, func: Callable, description: str = "") -> None:
         """注册工具
@@ -93,11 +101,13 @@ class ReActAgent:
         Returns:
             最终回答文本
         """
+        query = _sanitize_text(query)
         self.conversation_history = [
             {
                 "role": "system",
                 "content": self.system_prompt.format(
-                    tools_description=self._get_tools_description()
+                    tools_description=self._get_tools_description(),
+                    current_time=datetime.now().strftime("%Y年%m月%d日 %H:%M"),
                 ),
             },
             {"role": "user", "content": query},
