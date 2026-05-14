@@ -5,12 +5,12 @@
 否则使用占位实现（向后兼容）。
 """
 
-import uuid
 from typing import TYPE_CHECKING, Literal
 
 from langgraph.graph import END, START, StateGraph
 
 from src.multi_agent_system.config import Settings
+from src.multi_agent_system.core.logging import generate_trace_id, log_context
 from src.multi_agent_system.models.ticket import TicketCategory, TicketPriority
 from src.multi_agent_system.workflow.state import TicketState
 
@@ -53,8 +53,14 @@ def create_initial_state(content: str, ticket_id: str | None = None) -> TicketSt
     Returns:
         初始化后的工单状态字典
     """
+    if ticket_id is None:
+        ticket_id = f"TK-{generate_trace_id()}"
+
+    # 绑定 trace_id 到日志上下文
+    log_context(trace_id=ticket_id).__enter__()
+
     return TicketState(
-        ticket_id=ticket_id or uuid.uuid4().hex[:12],
+        ticket_id=ticket_id,
         content=content,
         category=None,
         priority=None,
