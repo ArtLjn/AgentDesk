@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Literal
 from langgraph.graph import END, START, StateGraph
 
 from src.multi_agent_system.config import Settings
-from src.multi_agent_system.core.logging import generate_trace_id, log_context
+from src.multi_agent_system.core.logging import generate_trace_id, log_context, trace_id_var
 from src.multi_agent_system.models.ticket import TicketCategory, TicketPriority
 from src.multi_agent_system.workflow.state import TicketState
 
@@ -56,8 +56,8 @@ def create_initial_state(content: str, ticket_id: str | None = None) -> TicketSt
     if ticket_id is None:
         ticket_id = f"TK-{generate_trace_id()}"
 
-    # 绑定 trace_id 到日志上下文
-    log_context(trace_id=ticket_id).__enter__()
+    # 绑定 trace_id 到日志上下文（贯穿整个工作流生命周期）
+    trace_id_var.set(ticket_id)
 
     return TicketState(
         ticket_id=ticket_id,
@@ -85,71 +85,73 @@ _reviewer_agent: "ReviewerAgent | None" = None
 
 async def receive(state: TicketState) -> dict:
     """初始化工单状态，设置 status 为 received。"""
-    return {
-        "status": "received",
-        "messages": state.get("messages", [])
-        + [{"role": "system", "content": f"工单 {state['ticket_id']} 已接收"}],
-    }
+    with log_context(agent="receive"):
+        return {
+            "status": "received",
+            "messages": state.get("messages", [])
+            + [{"role": "system", "content": f"工单 {state['ticket_id']} 已接收"}],
+        }
 
 
 async def classify(state: TicketState) -> dict:
     """分类节点：优先使用 ClassifierAgent，失败时降级到关键词匹配。"""
-    content = state["content"]
+    with log_context(agent="classifier"):
+        content = state["content"]
 
-    # 尝试使用 Agent 分类
-    if _classifier_agent is not None:
-        try:
-            result = await _classifier_agent.classify(content)
-            category = result["category"]
-            priority = result["priority"]
-            reason = result.get("reason", "")
-            return {
-                "category": category,
-                "priority": priority,
-                "status": "classifying",
-                "messages": state["messages"]
-                + [
-                    {
-                        "role": "classifier",
-                        "content": f"分类结果: {category}, 优先级: {priority}, 理由: {reason}",
-                    }
-                ],
-            }
-        except Exception as e:
-            # Agent 调用失败，降级到占位实现
-            from loguru import logger
+        # 尝试使用 Agent 分类
+        if _classifier_agent is not None:
+            try:
+                result = await _classifier_agent.classify(content)
+                category = result["category"]
+                priority = result["priority"]
+                reason = result.get("reason", "")
+                return {
+                    "category": category,
+                    "priority": priority,
+                    "status": "classifying",
+                    "messages": state["messages"]
+                    + [
+                        {
+                            "role": "classifier",
+                            "content": f"分类结果: {category}, 优先级: {priority}, 理由: {reason}",
+                        }
+                    ],
+                }
+            except Exception as e:
+                # Agent 调用失败，降级到占位实现
+                from loguru import logger
 
-            logger.warning(f"ClassifierAgent 调用失败，降级到关键词匹配: {e}")
+                logger.warning(f"ClassifierAgent 调用失败，降级到关键词匹配: {e}")
 
-    # 占位分类：关键词匹配
-    for keyword, (category, priority) in _CLASSIFY_RULES.items():
-        if keyword in content:
-            return {
-                "category": category,
-                "priority": priority,
-                "status": "classifying",
-                "messages": state["messages"]
-                + [
-                    {
-                        "role": "classifier",
-                        "content": f"分类结果: {category}, 优先级: {priority}",
-                    }
-                ],
-            }
+        # 占位分类：关键词匹配
+        for keyword, (category, priority) in _CLASSIFY_RULES.items():
+            if keyword in content:
+                return {
+                    "category": category,
+                    "priority": priority,
+                    "status": "classifying",
+                    "messages": state["messages"]
+                    + [
+                        {
+                            "role": "classifier",
+                            "content": f"分类结果: {category}, 优先级: {priority}",
+                        }
+                    ],
+                }
 
-    # 默认分类为咨询，优先级 P3
-    return {
-        "category": TicketCategory.INQUIRY.value,
-        "priority": TicketPriority.P3.value,
-        "status": "classifying",
-        "messages": state["messages"]
-        + [
-            {
-                "role": "classifier",
-                "content": f"分类结果: {TicketCategory.INQUIRY.value}, 优先级: {TicketPriority.P3.value}（默认）",
-            }
-        ],
-    }
+        # 默认分类为咨询，优先级 P3
+        return {
+            "category": TicketCategory.INQUIRY.value,
+            "priority": TicketPriority.P3.value,
+            "status": "classifying",
+            "messages": state["messages"]
+            + [
+                {
+                    "role": "classifier",
+                    "content": f"分类结果: {TicketCategory.INQUIRY.value}, 优先级: {TicketPriority.P3.value}（默认）",
+                }
+            ],
+        }
 
 
 async def route(state: TicketState) -> dict:
@@ -157,145 +159,153 @@ async def route(state: TicketState) -> dict:
 
     本节点不做状态修改，仅作为条件路由的汇聚点。
     """
-    return {}
+    with log_context(agent="router"):
+        return {}
 
 
 async def process(state: TicketState) -> dict:
     """处理节点：优先使用 ProcessorAgent，失败时降级到占位实现。"""
-    category = state.get("category", "")
-    priority = state.get("priority", "P3")
-    content = state["content"]
+    with log_context(agent="processor"):
+        category = state.get("category", "")
+        priority = state.get("priority", "P3")
+        content = state["content"]
 
-    # 尝试使用 Agent 处理
-    if _processor_agent is not None:
-        try:
-            result = await _processor_agent.process(content, category, priority)
-            processing_result = result["result"]
-            return {
-                "processing_result": processing_result,
-                "status": "processing",
-                "messages": state["messages"]
-                + [{"role": "processor", "content": processing_result}],
-            }
-        except Exception as e:
-            from loguru import logger
+        # 尝试使用 Agent 处理
+        if _processor_agent is not None:
+            try:
+                result = await _processor_agent.process(content, category, priority)
+                processing_result = result["result"]
+                return {
+                    "processing_result": processing_result,
+                    "status": "processing",
+                    "messages": state["messages"]
+                    + [{"role": "processor", "content": processing_result}],
+                }
+            except Exception as e:
+                from loguru import logger
 
-            logger.warning(f"ProcessorAgent 调用失败，降级到占位处理: {e}")
+                logger.warning(f"ProcessorAgent 调用失败，降级到占位处理: {e}")
 
-    # 占位处理：根据分类生成模拟结果
-    result_map = {
-        TicketCategory.TECHNICAL.value: f"已排查技术问题，生成解决方案（优先级: {priority}）",
-        TicketCategory.BILLING.value: f"已核实账单信息，生成处理方案（优先级: {priority}）",
-    }
-    processing_result = result_map.get(
-        category, f"已处理工单（分类: {category}, 优先级: {priority}）"
-    )
+        # 占位处理：根据分类生成模拟结果
+        result_map = {
+            TicketCategory.TECHNICAL.value: f"已排查技术问题，生成解决方案（优先级: {priority}）",
+            TicketCategory.BILLING.value: f"已核实账单信息，生成处理方案（优先级: {priority}）",
+        }
+        processing_result = result_map.get(
+            category, f"已处理工单（分类: {category}, 优先级: {priority}）"
+        )
 
-    return {
-        "processing_result": processing_result,
-        "status": "processing",
-        "messages": state["messages"]
-        + [{"role": "processor", "content": processing_result}],
-    }
+        return {
+            "processing_result": processing_result,
+            "status": "processing",
+            "messages": state["messages"]
+            + [{"role": "processor", "content": processing_result}],
+        }
 
 
 async def review(state: TicketState) -> dict:
     """审核节点：优先使用 ReviewerAgent，失败时降级到占位评分。"""
-    retry_count = state.get("retry_count", 0)
-    content = state["content"]
-    processing_result = state.get("processing_result", "")
-    category = state.get("category", "")
+    with log_context(agent="reviewer"):
+        retry_count = state.get("retry_count", 0)
+        content = state["content"]
+        processing_result = state.get("processing_result", "")
+        category = state.get("category", "")
 
-    # 尝试使用 Agent 审核
-    if _reviewer_agent is not None:
-        try:
-            result = await _reviewer_agent.review(content, processing_result, category)
-            score = result["score"]
-            return {
-                "review_score": score,
-                "status": "reviewing",
-                "messages": state["messages"]
-                + [
-                    {
-                        "role": "reviewer",
-                        "content": f"审核评分: {score:.2f}, 反馈: {result.get('feedback', '')}",
-                    }
-                ],
-            }
-        except Exception as e:
-            from loguru import logger
+        # 尝试使用 Agent 审核
+        if _reviewer_agent is not None:
+            try:
+                result = await _reviewer_agent.review(content, processing_result, category)
+                score = result["score"]
+                return {
+                    "review_score": score,
+                    "status": "reviewing",
+                    "messages": state["messages"]
+                    + [
+                        {
+                            "role": "reviewer",
+                            "content": f"审核评分: {score:.2f}, 反馈: {result.get('feedback', '')}",
+                        }
+                    ],
+                }
+            except Exception as e:
+                from loguru import logger
 
-            logger.warning(f"ReviewerAgent 调用失败，降级到占位评分: {e}")
+                logger.warning(f"ReviewerAgent 调用失败，降级到占位评分: {e}")
 
-    # 占位审核：重试次数越多，评分越低
-    base_score = 0.85
-    score = max(0.3, base_score - retry_count * 0.15)
+        # 占位审核：重试次数越多，评分越低
+        base_score = 0.85
+        score = max(0.3, base_score - retry_count * 0.15)
 
-    return {
-        "review_score": score,
-        "status": "reviewing",
-        "messages": state["messages"]
-        + [{"role": "reviewer", "content": f"审核评分: {score:.2f}"}],
-    }
+        return {
+            "review_score": score,
+            "status": "reviewing",
+            "messages": state["messages"]
+            + [{"role": "reviewer", "content": f"审核评分: {score:.2f}"}],
+        }
 
 
 async def auto_reply(state: TicketState) -> dict:
     """咨询类工单直接生成回复。"""
-    reply = f"感谢您的咨询。关于「{state['content'][:50]}」，已为您生成自动回复。"
-    return {
-        "processing_result": reply,
-        "status": "processing",
-        "messages": state["messages"] + [{"role": "auto_reply", "content": reply}],
-    }
+    with log_context(agent="auto_reply"):
+        reply = f"感谢您的咨询。关于「{state['content'][:50]}」，已为您生成自动回复。"
+        return {
+            "processing_result": reply,
+            "status": "processing",
+            "messages": state["messages"] + [{"role": "auto_reply", "content": reply}],
+        }
 
 
 async def escalate(state: TicketState) -> dict:
     """升级节点：P0 或投诉类工单标记需要人工处理。"""
-    category = state.get("category", "")
-    priority = state.get("priority", "P3")
+    with log_context(agent="escalation"):
+        category = state.get("category", "")
+        priority = state.get("priority", "P3")
 
-    reason = (
-        "P0 紧急工单"
-        if priority == TicketPriority.P0.value
-        else f"投诉类工单（分类: {category}）"
-    )
-    escalation_msg = f"已升级至人工处理，原因: {reason}"
+        reason = (
+            "P0 紧急工单"
+            if priority == TicketPriority.P0.value
+            else f"投诉类工单（分类: {category}）"
+        )
+        escalation_msg = f"已升级至人工处理，原因: {reason}"
 
-    return {
-        "processing_result": escalation_msg,
-        "status": "processing",
-        "messages": state["messages"]
-        + [{"role": "escalator", "content": escalation_msg}],
-    }
+        return {
+            "processing_result": escalation_msg,
+            "status": "processing",
+            "messages": state["messages"]
+            + [{"role": "escalator", "content": escalation_msg}],
+        }
 
 
 async def notify(state: TicketState) -> dict:
     """发送处理结果通知。"""
-    result = state.get("processing_result", "无处理结果")
-    notification = f"通知: 工单 {state['ticket_id']} 处理完成 - {result}"
+    with log_context(agent="notification"):
+        result = state.get("processing_result", "无处理结果")
+        notification = f"通知: 工单 {state['ticket_id']} 处理完成 - {result}"
 
-    return {
-        "messages": state["messages"] + [{"role": "notifier", "content": notification}],
-    }
+        return {
+            "messages": state["messages"] + [{"role": "notifier", "content": notification}],
+        }
 
 
 async def complete(state: TicketState) -> dict:
     """归档节点：标记工单状态为已完成。"""
-    return {
-        "status": "completed",
-        "messages": state["messages"]
-        + [{"role": "system", "content": f"工单 {state['ticket_id']} 已归档完成"}],
-    }
+    with log_context(agent="complete"):
+        return {
+            "status": "completed",
+            "messages": state["messages"]
+            + [{"role": "system", "content": f"工单 {state['ticket_id']} 已归档完成"}],
+        }
 
 
 async def handle_failure(state: TicketState) -> dict:
     """失败处理节点：标记工单状态为失败。"""
-    error_msg = f"工单处理失败，已达最大重试次数({_MAX_RETRIES}次)"
-    return {
-        "status": "failed",
-        "error": error_msg,
-        "messages": state["messages"] + [{"role": "system", "content": error_msg}],
-    }
+    with log_context(agent="failure_handler"):
+        error_msg = f"工单处理失败，已达最大重试次数({_MAX_RETRIES}次)"
+        return {
+            "status": "failed",
+            "error": error_msg,
+            "messages": state["messages"] + [{"role": "system", "content": error_msg}],
+        }
 
 
 # ============================================================
@@ -354,10 +364,11 @@ def retry_decision(state: TicketState) -> Literal["process", "handle_failure"]:
 
 async def retry_check(state: TicketState) -> dict:
     """重试检查节点：递增重试计数。"""
-    return {
-        "retry_count": state.get("retry_count", 0) + 1,
-        "review_score": None,  # 重置评分，等待重新审核
-    }
+    with log_context(agent="retry_check"):
+        return {
+            "retry_count": state.get("retry_count", 0) + 1,
+            "review_score": None,  # 重置评分，等待重新审核
+        }
 
 
 # ============================================================
