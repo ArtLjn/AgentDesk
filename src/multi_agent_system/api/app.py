@@ -1,8 +1,11 @@
 """FastAPI 应用主模块，管理应用生命周期和路由注册。"""
 
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
 from loguru import logger
 
 from src.multi_agent_system.agents.classifier import ClassifierAgent
@@ -81,7 +84,21 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 # 注册路由
 from src.multi_agent_system.api.routes import router  # noqa: E402
 
 app.include_router(router, prefix="/api")
+
+
+@app.get("/", response_class=HTMLResponse, include_in_schema=False)
+async def index() -> str:
+    """返回内置 Web UI 页面。"""
+    html_path = Path(__file__).parent.parent / "web" / "index.html"
+    return html_path.read_text(encoding="utf-8")

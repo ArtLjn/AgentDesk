@@ -11,15 +11,17 @@ class Settings(BaseSettings):
     所有字段均可通过同名环境变量或 .env 文件覆盖。
     """
 
-    # Ollama 服务地址
-    ollama_base_url: str = "http://localhost:11434"
+    # LLM (Chat) & Embedding 都用 HomeUbuntu 本地 Ollama
+    llm_base_url: str = "http://172.16.58.68:11434"
+    llm_api_key: str = "ollama"
+    embedding_base_url: str = "http://172.16.58.68:11434"
 
     # Qdrant 向量数据库配置
-    qdrant_url: str = "http://localhost:6333"
+    qdrant_url: str = "http://qdrant:6333"
     qdrant_collection: str = "knowledge_base"
 
     # LLM 模型配置
-    llm_model: str = "minimax-m2.7:cloud"
+    llm_model: str = "qwen3:8b"
     embedding_model: str = "qwen3-embedding:4b"
     embedding_dim: int = 2560
 

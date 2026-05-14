@@ -1,7 +1,6 @@
 """Supervisor 协调 Agent：全局协调 + 异常兜底。"""
 
 import json
-import os
 from typing import TYPE_CHECKING
 
 from loguru import logger
@@ -86,8 +85,8 @@ class CoordinatorAgent:
         if self._client is None:
             settings = Settings()
             self._client = AsyncOpenAI(
-                api_key=self._api_key or os.getenv("OPENAI_API_KEY", "ollama"),
-                base_url=self._base_url or f"{settings.ollama_base_url}/v1",
+                api_key=self._api_key or settings.llm_api_key,
+                base_url=self._base_url or settings.llm_base_url,
             )
         return self._client
 
@@ -332,5 +331,6 @@ class CoordinatorAgent:
             model=settings.llm_model,
             notification_tool=notification_tool,
             knowledge_tool=knowledge_tool,
-            base_url=f"{settings.ollama_base_url}/v1",
+            api_key=settings.llm_api_key,
+            base_url=settings.llm_base_url,
         )

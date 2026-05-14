@@ -35,13 +35,13 @@ class KnowledgeSearchTool:
         self,
         qdrant_url: str,
         collection_name: str,
-        ollama_base_url: str,
+        embedding_base_url: str,
         embedding_model: str,
         embedding_dim: int,
     ) -> None:
         self._client = QdrantClient(url=qdrant_url)
         self._collection_name = collection_name
-        self._ollama_base_url = ollama_base_url.rstrip("/")
+        self._embedding_base_url = embedding_base_url.rstrip("/")
         self._embedding_model = embedding_model
         self._embedding_dim = embedding_dim
 
@@ -74,12 +74,15 @@ class KnowledgeSearchTool:
         Raises:
             RuntimeError: API 调用失败时抛出
         """
-        url = f"{self._ollama_base_url}/api/embeddings"
+        url = f"{self._embedding_base_url}/api/embeddings"
         payload = {"model": self._embedding_model, "prompt": text}
 
+        logger.debug(f"🔢 [Embedding] 调用模型: {self._embedding_model}, 服务: {url}")
         response = requests.post(url, json=payload, timeout=30)
         response.raise_for_status()
-        return response.json()["embedding"]
+        embedding = response.json()["embedding"]
+        logger.debug(f"🔢 [Embedding] 成功生成向量，维度: {len(embedding)}")
+        return embedding
 
     def _split_chunks(self, text: str) -> list[str]:
         """将文本按固定大小分块，带重叠。
@@ -177,6 +180,8 @@ class KnowledgeSearchTool:
         self.ensure_collection()
         query_vector = self._get_embedding(query)
 
+        from qdrant_client.models import ScoredPoint
+
         results = self._client.search(
             collection_name=self._collection_name,
             query_vector=query_vector,
@@ -211,7 +216,7 @@ class KnowledgeSearchTool:
         return KnowledgeSearchTool(
             qdrant_url=settings.qdrant_url,
             collection_name=settings.qdrant_collection,
-            ollama_base_url=settings.ollama_base_url,
+            embedding_base_url=settings.embedding_base_url,
             embedding_model=settings.embedding_model,
             embedding_dim=settings.embedding_dim,
         )

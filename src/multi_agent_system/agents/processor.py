@@ -1,7 +1,7 @@
 """工单处理 Agent：检索知识库并生成解决方案。"""
 
 import json
-import os
+import re
 from typing import TYPE_CHECKING
 
 from loguru import logger
@@ -14,6 +14,14 @@ if TYPE_CHECKING:
     from src.multi_agent_system.tools.knowledge_search import KnowledgeSearchTool
 
 __all__ = ["ProcessorAgent"]
+
+
+def _parse_json_response(raw: str) -> dict:
+    """从 LLM 响应中提取 JSON，兼容 markdown 代码块包裹。"""
+    match = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", raw, re.DOTALL)
+    if match:
+        return json.loads(match.group(1).strip())
+    return json.loads(raw)
 
 # 处理提示词模板
 _PROCESSOR_SYSTEM_PROMPT = """\
@@ -67,8 +75,8 @@ class ProcessorAgent:
         if self._client is None:
             settings = Settings()
             self._client = AsyncOpenAI(
-                api_key=self._api_key or os.getenv("OPENAI_API_KEY", "ollama"),
-                base_url=self._base_url or f"{settings.ollama_base_url}/v1",
+                api_key=self._api_key or settings.llm_api_key,
+                base_url=self._base_url or settings.llm_base_url,
             )
         return self._client
 
@@ -171,6 +179,9 @@ class ProcessorAgent:
             context_section=context_section,
         )
 
+        logger.info(f"🤖 [Processor] 调用 LLM 模型: {self._model}")
+        logger.debug(f"🤖 [Processor] 知识库上下文:\n{knowledge_context}")
+
         response = await self.client.chat.completions.create(
             model=self._model,
             messages=[
@@ -182,7 +193,8 @@ class ProcessorAgent:
         )
 
         raw = response.choices[0].message.content or "{}"
-        result = json.loads(raw)
+        logger.info(f"🤖 [Processor] LLM 响应: {raw}")
+        result = _parse_json_response(raw)
 
         return {
             "result": result.get("result", "处理完成，但未生成明确方案"),
@@ -235,5 +247,6 @@ class ProcessorAgent:
         return ProcessorAgent(
             model=settings.llm_model,
             knowledge_tool=knowledge_tool,
-            base_url=f"{settings.ollama_base_url}/v1",
+            api_key=settings.llm_api_key,
+            base_url=settings.llm_base_url,
         )

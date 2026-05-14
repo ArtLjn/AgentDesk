@@ -1,7 +1,7 @@
 """工单审核 Agent：检查处理结果质量，返回 0-1 评分。"""
 
 import json
-import os
+import re
 
 from loguru import logger
 from openai import AsyncOpenAI
@@ -9,6 +9,14 @@ from openai import AsyncOpenAI
 from src.multi_agent_system.config import Settings
 
 __all__ = ["ReviewerAgent"]
+
+
+def _parse_json_response(raw: str) -> dict:
+    """从 LLM 响应中提取 JSON，兼容 markdown 代码块包裹。"""
+    match = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", raw, re.DOTALL)
+    if match:
+        return json.loads(match.group(1).strip())
+    return json.loads(raw)
 
 # 审核提示词
 _REVIEWER_SYSTEM_PROMPT = """\
@@ -59,8 +67,8 @@ class ReviewerAgent:
         if self._client is None:
             settings = Settings()
             self._client = AsyncOpenAI(
-                api_key=self._api_key or os.getenv("OPENAI_API_KEY", "ollama"),
-                base_url=self._base_url or f"{settings.ollama_base_url}/v1",
+                api_key=self._api_key or settings.llm_api_key,
+                base_url=self._base_url or settings.llm_base_url,
             )
         return self._client
 
@@ -111,6 +119,9 @@ class ReviewerAgent:
             processing_result=processing_result,
         )
 
+        logger.info(f"🤖 [Reviewer] 调用 LLM 模型: {self._model}")
+        logger.debug(f"🤖 [Reviewer] 审核内容:\n工单: {content}\n结果: {processing_result}")
+
         response = await self.client.chat.completions.create(
             model=self._model,
             messages=[
@@ -122,7 +133,8 @@ class ReviewerAgent:
         )
 
         raw = response.choices[0].message.content or "{}"
-        result = json.loads(raw)
+        logger.info(f"🤖 [Reviewer] LLM 响应: {raw}")
+        result = _parse_json_response(raw)
 
         score = float(result.get("score", 0.7))
         # 确保 score 在 0-1 范围内
@@ -155,5 +167,6 @@ class ReviewerAgent:
         settings = Settings()
         return ReviewerAgent(
             model=settings.llm_model,
-            base_url=f"{settings.ollama_base_url}/v1",
+            api_key=settings.llm_api_key,
+            base_url=settings.llm_base_url,
         )

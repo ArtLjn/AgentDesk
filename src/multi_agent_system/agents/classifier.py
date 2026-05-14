@@ -1,7 +1,7 @@
 """工单分类 Agent：分析工单内容，输出分类、优先级和路由建议。"""
 
 import json
-import os
+import re
 
 from loguru import logger
 from openai import AsyncOpenAI
@@ -10,6 +10,15 @@ from src.multi_agent_system.config import Settings
 from src.multi_agent_system.models.ticket import TicketCategory, TicketPriority
 
 __all__ = ["ClassifierAgent"]
+
+
+def _parse_json_response(raw: str) -> dict:
+    """从 LLM 响应中提取 JSON，兼容 markdown 代码块包裹。"""
+    # 尝试提取 ```json ... ``` 或 ``` ... ``` 中的内容
+    match = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", raw, re.DOTALL)
+    if match:
+        return json.loads(match.group(1).strip())
+    return json.loads(raw)
 
 # 分类提示词
 _CLASSIFIER_SYSTEM_PROMPT = """\
@@ -80,8 +89,8 @@ class ClassifierAgent:
         if self._client is None:
             settings = Settings()
             self._client = AsyncOpenAI(
-                api_key=self._api_key or os.getenv("OPENAI_API_KEY", "ollama"),
-                base_url=self._base_url or f"{settings.ollama_base_url}/v1",
+                api_key=self._api_key or settings.llm_api_key,
+                base_url=self._base_url or settings.llm_base_url,
             )
         return self._client
 
@@ -112,6 +121,9 @@ class ClassifierAgent:
         Raises:
             ValueError: LLM 返回的 JSON 格式无效时抛出
         """
+        logger.info(f"🤖 [Classifier] 调用 LLM 模型: {self._model}, 内容长度: {len(content)}")
+        logger.debug(f"🤖 [Classifier] 请求提示词:\n{_CLASSIFIER_SYSTEM_PROMPT}\n用户内容: {content}")
+
         response = await self.client.chat.completions.create(
             model=self._model,
             messages=[
@@ -123,7 +135,8 @@ class ClassifierAgent:
         )
 
         raw = response.choices[0].message.content or "{}"
-        result = json.loads(raw)
+        logger.info(f"🤖 [Classifier] LLM 响应: {raw}")
+        result = _parse_json_response(raw)
 
         # 校验字段存在且值合法
         category = result.get("category", "")
@@ -178,5 +191,6 @@ class ClassifierAgent:
         settings = Settings()
         return ClassifierAgent(
             model=settings.llm_model,
-            base_url=f"{settings.ollama_base_url}/v1",
+            api_key=settings.llm_api_key,
+            base_url=settings.llm_base_url,
         )

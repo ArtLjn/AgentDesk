@@ -13,7 +13,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # 应用代码
 COPY src/ src/
-COPY web/ web/
 
 # 数据目录（知识库向量数据等）
 COPY data/ data/
