@@ -3,9 +3,14 @@
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+import time
+
+from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
 from loguru import logger
 
 from src.multi_agent_system.agents.classifier import ClassifierAgent
@@ -72,6 +77,10 @@ async def lifespan(app: FastAPI):
 
     logger.info("应用初始化完成")
 
+    from src.multi_agent_system.core.metrics import SYSTEM_UPTIME_SECONDS
+
+    SYSTEM_UPTIME_SECONDS.set(time.time())
+
     yield
 
     # 关闭时清理
@@ -83,6 +92,50 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+
+
+class MetricsMiddleware(BaseHTTPMiddleware):
+    """记录请求延迟和错误率的中间件，同时暴露 Prometheus 指标。"""
+
+    async def dispatch(self, request: Request, call_next):
+        """处理请求并记录指标。"""
+        from src.multi_agent_system.core.metrics import (
+            ACTIVE_REQUESTS,
+            HTTP_REQUESTS_TOTAL,
+            HTTP_REQUEST_DURATION,
+            metrics_collector,
+        )
+
+        ACTIVE_REQUESTS.inc()
+        start = time.time()
+        status_code = 500
+        is_error = False
+        try:
+            response = await call_next(request)
+            status_code = response.status_code
+            if status_code >= 500:
+                is_error = True
+            return response
+        except Exception:
+            is_error = True
+            raise
+        finally:
+            duration_ms = (time.time() - start) * 1000
+            duration_seconds = duration_ms / 1000.0
+            metrics_collector.record_request(duration_ms, is_error)
+
+            method = request.method
+            endpoint = request.url.path
+            HTTP_REQUEST_DURATION.labels(method=method, endpoint=endpoint).observe(
+                duration_seconds
+            )
+            HTTP_REQUESTS_TOTAL.labels(
+                method=method, endpoint=endpoint, status=str(status_code)
+            ).inc()
+            ACTIVE_REQUESTS.dec()
+
+
+app.add_middleware(MetricsMiddleware)
 
 app.add_middleware(
     CORSMiddleware,
@@ -102,3 +155,9 @@ async def index() -> str:
     """返回内置 Web UI 页面。"""
     html_path = Path(__file__).parent.parent / "web" / "index.html"
     return html_path.read_text(encoding="utf-8")
+
+
+@app.get("/prometheus")
+async def prometheus_metrics() -> Response:
+    """返回 Prometheus 格式的指标。"""
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
