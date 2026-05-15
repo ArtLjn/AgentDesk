@@ -8,7 +8,6 @@ import time
 from collections import deque
 from typing import Any
 
-from loguru import logger
 from prometheus_client import Counter, Gauge, Histogram
 
 # ──────────────────────────────────────────────────────────────
