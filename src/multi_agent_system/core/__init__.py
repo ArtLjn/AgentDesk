@@ -24,6 +24,7 @@ from src.multi_agent_system.core.logging import (
     structured_logger,
     trace_id_var,
 )
+from src.multi_agent_system.core.metrics import MetricsCollector, metrics_collector
 from src.multi_agent_system.core.retry import with_retry
 
 __all__ = [
@@ -47,4 +48,6 @@ __all__ = [
     "reset_model_router",
     "concurrent_execute",
     "run_with_semaphore",
+    "MetricsCollector",
+    "metrics_collector",
 ]

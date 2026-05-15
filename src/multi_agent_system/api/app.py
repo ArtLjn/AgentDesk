@@ -1,11 +1,14 @@
 """FastAPI 应用主模块，管理应用生命周期和路由注册。"""
 
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 from loguru import logger
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
 
 from src.multi_agent_system.agents.classifier import ClassifierAgent
 from src.multi_agent_system.agents.coordinator import CoordinatorAgent
@@ -15,7 +18,6 @@ from src.multi_agent_system.config import Settings
 from src.multi_agent_system.tools.analytics import AnalyticsTool
 from src.multi_agent_system.tools.db_query import DBQueryTool
 from src.multi_agent_system.tools.knowledge_search import KnowledgeSearchTool
-from src.multi_agent_system.tools.notification import NotificationTool
 from src.multi_agent_system.workflow.graph import build_ticket_graph
 
 __all__ = ["app"]
@@ -24,6 +26,8 @@ __all__ = ["app"]
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理：启动时初始化工具、Agent 和工作流，关闭时清理。"""
+    logger.info("🚀 多Agent工单处理系统启动")
+
     settings = Settings()
 
     # 初始化基础工具
@@ -74,7 +78,31 @@ async def lifespan(app: FastAPI):
     yield
 
     # 关闭时清理
-    logger.info("应用关闭，清理资源")
+    logger.info("🛑 应用关闭中，清理资源...")
+    from src.multi_agent_system.core.cache import reset_cache
+    reset_cache()
+    logger.info("✅ 资源清理完成")
+
+
+class MetricsMiddleware(BaseHTTPMiddleware):
+    """记录请求延迟和错误率的中间件。"""
+
+    async def dispatch(self, request: Request, call_next):
+        """处理请求并记录指标。"""
+        from src.multi_agent_system.core.metrics import metrics_collector
+        start = time.time()
+        is_error = False
+        try:
+            response = await call_next(request)
+            if response.status_code >= 500:
+                is_error = True
+            return response
+        except Exception:
+            is_error = True
+            raise
+        finally:
+            duration_ms = (time.time() - start) * 1000
+            metrics_collector.record_request(duration_ms, is_error)
 
 
 app = FastAPI(
@@ -82,6 +110,8 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+
+app.add_middleware(MetricsMiddleware)
 
 # 自定义 CORS 中间件：HTTP 正常添加跨域头，WebSocket 直接放行
 # Starlette 自带的 CORSMiddleware 会拦截 WebSocket 的 Origin 检查导致 403
@@ -145,3 +175,29 @@ async def index() -> str:
     """返回内置 Web UI 页面。"""
     html_path = Path(__file__).parent.parent / "web" / "index.html"
     return html_path.read_text(encoding="utf-8")
+
+
+@app.get("/health")
+async def health_check() -> dict:
+    """健康检查端点。"""
+    from src.multi_agent_system.core.cache import _get_llm_cache
+    from src.multi_agent_system.core.model_router import get_model_router
+
+    cache = _get_llm_cache()
+    cache_stats = cache.get_stats() if cache else {"enabled": False}
+    router = get_model_router()
+
+    return {
+        "status": "healthy",
+        "version": "1.0.0",
+        "cache": cache_stats,
+        "routes": router.get_stats() if router else {},
+        "timestamp": time.time(),
+    }
+
+
+@app.get("/metrics")
+async def metrics() -> dict:
+    """性能指标端点。"""
+    from src.multi_agent_system.core.metrics import metrics_collector
+    return metrics_collector.get_stats()
