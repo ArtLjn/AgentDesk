@@ -18,6 +18,7 @@ from src.multi_agent_system.config import Settings
 from src.multi_agent_system.tools.analytics import AnalyticsTool
 from src.multi_agent_system.tools.db_query import DBQueryTool
 from src.multi_agent_system.tools.knowledge_search import KnowledgeSearchTool
+from src.multi_agent_system.tools.notification import NotificationTool
 from src.multi_agent_system.workflow.graph import build_ticket_graph
 
 __all__ = ["app"]
