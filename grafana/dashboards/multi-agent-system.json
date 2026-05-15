@@ -1,0 +1,197 @@
+{
+  "dashboard": {
+    "id": null,
+    "uid": "multi-agent-system",
+    "title": "多Agent工单处理系统",
+    "tags": ["prometheus", "multi-agent"],
+    "timezone": "browser",
+    "schemaVersion": 36,
+    "refresh": "5s",
+    "panels": [
+      {
+        "id": 1,
+        "title": "系统运行时间",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "multi_agent_system_uptime_seconds",
+            "legendFormat": ""
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "s"
+          }
+        },
+        "gridPos": { "x": 0, "y": 0, "w": 6, "h": 4 }
+      },
+      {
+        "id": 2,
+        "title": "总请求数",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "sum(multi_agent_http_requests_total)",
+            "legendFormat": ""
+          }
+        ],
+        "gridPos": { "x": 6, "y": 0, "w": 6, "h": 4 }
+      },
+      {
+        "id": 3,
+        "title": "错误率",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "sum(rate(multi_agent_http_requests_total{status=~\"5..\"}[5m])) / sum(rate(multi_agent_http_requests_total[5m]))",
+            "legendFormat": ""
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percentunit",
+            "thresholds": {
+              "steps": [
+                { "color": "green", "value": null },
+                { "color": "yellow", "value": 0.01 },
+                { "color": "red", "value": 0.05 }
+              ]
+            }
+          }
+        },
+        "gridPos": { "x": 12, "y": 0, "w": 6, "h": 4 }
+      },
+      {
+        "id": 4,
+        "title": "活跃请求数",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "multi_agent_active_requests",
+            "legendFormat": ""
+          }
+        ],
+        "gridPos": { "x": 18, "y": 0, "w": 6, "h": 4 }
+      },
+      {
+        "id": 5,
+        "title": "Agent 执行次数",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "sum by (agent_name) (rate(multi_agent_agent_execution_total[5m]))",
+            "legendFormat": "{{agent_name}}"
+          }
+        ],
+        "gridPos": { "x": 0, "y": 4, "w": 12, "h": 8 }
+      },
+      {
+        "id": 6,
+        "title": "Agent 平均执行耗时",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "sum by (agent_name) (rate(multi_agent_agent_execution_duration_seconds_sum[5m])) / sum by (agent_name) (rate(multi_agent_agent_execution_duration_seconds_count[5m]))",
+            "legendFormat": "{{agent_name}}"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "s"
+          }
+        },
+        "gridPos": { "x": 12, "y": 4, "w": 12, "h": 8 }
+      },
+      {
+        "id": 7,
+        "title": "LLM 调用次数",
+        "type": "piechart",
+        "targets": [
+          {
+            "expr": "sum by (model) (multi_agent_llm_calls_total)",
+            "legendFormat": "{{model}}"
+          }
+        ],
+        "gridPos": { "x": 0, "y": 12, "w": 12, "h": 8 }
+      },
+      {
+        "id": 8,
+        "title": "LLM 调用延迟 P95",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, sum by (model, le) (rate(multi_agent_llm_call_duration_seconds_bucket[5m])))",
+            "legendFormat": "{{model}}"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "s"
+          }
+        },
+        "gridPos": { "x": 12, "y": 12, "w": 12, "h": 8 }
+      },
+      {
+        "id": 9,
+        "title": "缓存命中率",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "multi_agent_cache_hit_rate",
+            "legendFormat": ""
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percentunit",
+            "min": 0,
+            "max": 1
+          }
+        },
+        "gridPos": { "x": 0, "y": 20, "w": 12, "h": 8 }
+      },
+      {
+        "id": 10,
+        "title": "缓存命中/未命中",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "sum by (result) (rate(multi_agent_cache_queries_total[5m]))",
+            "legendFormat": "{{result}}"
+          }
+        ],
+        "gridPos": { "x": 12, "y": 20, "w": 12, "h": 8 }
+      },
+      {
+        "id": 11,
+        "title": "HTTP 请求 QPS",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "sum by (endpoint) (rate(multi_agent_http_requests_total[5m]))",
+            "legendFormat": "{{endpoint}}"
+          }
+        ],
+        "gridPos": { "x": 0, "y": 28, "w": 12, "h": 8 }
+      },
+      {
+        "id": 12,
+        "title": "HTTP 请求延迟 P95",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, sum by (endpoint, le) (rate(multi_agent_http_request_duration_seconds_bucket[5m])))",
+            "legendFormat": "{{endpoint}}"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "s"
+          }
+        },
+        "gridPos": { "x": 12, "y": 28, "w": 12, "h": 8 }
+      }
+    ]
+  },
+  "overwrite": true
+}
