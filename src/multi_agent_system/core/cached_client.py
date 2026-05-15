@@ -44,20 +44,30 @@ class CachedLLMClient:
         model: str | None = None,
         temperature: float = 0.7,
         cache: bool = True,
+        task_type: str | None = None,
         **kwargs: Any,
     ) -> Any:
-        """调用 chat.completions.create，支持缓存。
+        """调用 chat.completions.create，支持缓存和模型路由。
 
         Args:
             messages: 消息列表
-            model: 模型名称，默认使用初始化时的模型
+            model: 模型名称（手动指定时优先级最高）
             temperature: 温度参数
             cache: 是否使用缓存（默认 True），设置为 False 跳过缓存
+            task_type: 任务类型（如 classify/process/review/report），用于模型路由
             **kwargs: 其他传递给 API 的参数
         """
         from src.multi_agent_system.core.cache import _get_llm_cache
 
-        use_model = model or self.model
+        # 模型选择优先级：手动指定 > task_type 路由 > 默认模型
+        if model is not None:
+            use_model = model
+        elif task_type is not None:
+            from src.multi_agent_system.core.model_router import get_model_router
+
+            use_model = get_model_router().get_model(task_type)
+        else:
+            use_model = self.model
         llm_cache = _get_llm_cache()
 
         # 缓存未启用或显式禁用缓存，直接调用

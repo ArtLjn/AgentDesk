@@ -5,6 +5,11 @@
 
 from src.multi_agent_system.core.cache import LLMCache, llm_cache, reset_cache
 from src.multi_agent_system.core.cached_client import CachedLLMClient
+from src.multi_agent_system.core.model_router import (
+    ModelRouter,
+    get_model_router,
+    reset_model_router,
+)
 from src.multi_agent_system.core.exceptions import (
     FallbackExhaustedError,
     NonRetryableError,
@@ -36,4 +41,7 @@ __all__ = [
     "llm_cache",
     "reset_cache",
     "CachedLLMClient",
+    "ModelRouter",
+    "get_model_router",
+    "reset_model_router",
 ]

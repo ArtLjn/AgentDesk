@@ -72,12 +72,14 @@ class CoordinatorAgent:
         knowledge_tool: "KnowledgeSearchTool",
         api_key: str | None = None,
         base_url: str | None = None,
+        task_type: str = "report",
     ) -> None:
         self._model = model
         self._notification_tool = notification_tool
         self._knowledge_tool = knowledge_tool
         self._api_key = api_key
         self._base_url = base_url
+        self._task_type = task_type
         self._client: CachedLLMClient | None = None
 
     @property
@@ -149,6 +151,7 @@ class CoordinatorAgent:
                 ],
                 temperature=0.2,
                 response_format={"type": "json_object"},
+                task_type=self._task_type,
             )
         except AuthenticationError as e:
             raise NonRetryableError(f"API 认证失败: {e}", cause=e)
@@ -236,6 +239,7 @@ class CoordinatorAgent:
                 ],
                 temperature=0.2,
                 response_format={"type": "json_object"},
+                task_type=self._task_type,
             )
         except AuthenticationError as e:
             raise NonRetryableError(f"API 认证失败: {e}", cause=e)
@@ -315,6 +319,7 @@ class CoordinatorAgent:
                     {"role": "user", "content": "请生成工单处理报告"},
                 ],
                 temperature=0.3,
+                task_type=self._task_type,
             )
         except AuthenticationError as e:
             raise NonRetryableError(f"API 认证失败: {e}", cause=e)

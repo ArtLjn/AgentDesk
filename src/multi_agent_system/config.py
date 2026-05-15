@@ -34,6 +34,16 @@ class Settings(BaseSettings):
     max_retries: int = 3
     review_threshold: float = 0.7
 
+    # 模型路由配置
+    model_routes: dict[str, str] = {
+        "classify": "qwen3:4b",
+        "process": "qwen3:8b",
+        "review": "qwen3:8b",
+        "report": "qwen3:14b",
+        "default": "qwen3:8b",
+    }
+    fallback_model: str = "qwen3:8b"
+
     # API 服务配置
     api_host: str = "0.0.0.0"
     api_port: int = 8000
