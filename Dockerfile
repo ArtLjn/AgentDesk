@@ -8,8 +8,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Python 依赖（利用 Docker 层缓存，依赖不变时无需重新安装）
+ARG PIP_INDEX_URL=https://pypi.org/simple
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -i ${PIP_INDEX_URL} -r requirements.txt
 
 # 应用代码
 COPY src/ src/
@@ -20,9 +21,7 @@ COPY scripts/ scripts/
 # 数据目录（知识库向量数据等）
 COPY data/ data/
 
-# 环境变量（包含 API key 等敏感信息，生产环境建议改用环境变量注入）
-COPY .env .
-
+# 环境变量通过 docker-compose 或运行时注入，不打包进镜像
 EXPOSE 8000
 
 # API 服务
