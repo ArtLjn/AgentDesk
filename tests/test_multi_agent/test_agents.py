@@ -28,12 +28,12 @@ def _make_mock_response(content_dict: dict) -> MagicMock:
 
 
 def _make_mock_client(response: MagicMock | None = None, side_effect=None) -> AsyncMock:
-    """构造 mock 的 OpenAI 异步客户端。"""
+    """构造 mock 的 CachedLLMClient（chat_completions_create 方法）。"""
     mock_client = AsyncMock()
     if side_effect:
-        mock_client.chat.completions.create = AsyncMock(side_effect=side_effect)
+        mock_client.chat_completions_create = AsyncMock(side_effect=side_effect)
     elif response:
-        mock_client.chat.completions.create = AsyncMock(return_value=response)
+        mock_client.chat_completions_create = AsyncMock(return_value=response)
     return mock_client
 
 

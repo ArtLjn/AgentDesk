@@ -4,10 +4,10 @@ import json
 import re
 
 from loguru import logger
-from openai import APIConnectionError, APIError, AsyncOpenAI, AuthenticationError, RateLimitError
+from openai import APIConnectionError, APIError, AuthenticationError, RateLimitError
 
 from src.multi_agent_system.config import Settings
-from src.multi_agent_system.core import fallback_registry, with_retry
+from src.multi_agent_system.core import CachedLLMClient, fallback_registry, with_retry
 from src.multi_agent_system.core.exceptions import NonRetryableError, RetryableError
 
 __all__ = ["ReviewerAgent"]
@@ -61,16 +61,17 @@ class ReviewerAgent:
         self._model = model
         self._api_key = api_key
         self._base_url = base_url
-        self._client: AsyncOpenAI | None = None
+        self._client: CachedLLMClient | None = None
 
     @property
-    def client(self) -> AsyncOpenAI:
-        """延迟初始化 OpenAI 异步客户端。"""
+    def client(self) -> CachedLLMClient:
+        """延迟初始化带缓存的 LLM 客户端。"""
         if self._client is None:
             settings = Settings()
-            self._client = AsyncOpenAI(
+            self._client = CachedLLMClient(
                 api_key=self._api_key or settings.llm_api_key,
                 base_url=self._base_url or settings.llm_base_url,
+                model=self._model,
             )
         return self._client
 
@@ -134,8 +135,7 @@ class ReviewerAgent:
         logger.debug(f"[Reviewer] 审核内容:\n工单: {content}\n结果: {processing_result}")
 
         try:
-            response = await self.client.chat.completions.create(
-                model=self._model,
+            response = await self.client.chat_completions_create(
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": "请对以上处理结果进行评分"},

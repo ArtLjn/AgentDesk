@@ -25,6 +25,11 @@ class Settings(BaseSettings):
     embedding_model: str = "qwen3-embedding:4b"
     embedding_dim: int = 2560
 
+    # 缓存配置
+    cache_enabled: bool = True
+    cache_max_size: int = 512
+    cache_ttl: int = 300  # 秒
+
     # 处理策略
     max_retries: int = 3
     review_threshold: float = 0.7

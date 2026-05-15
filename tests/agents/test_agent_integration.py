@@ -39,12 +39,12 @@ def _make_mock_response_text(text: str) -> MagicMock:
 
 
 def _make_mock_client(response: MagicMock | None = None, side_effect=None) -> AsyncMock:
-    """构造 mock 的 OpenAI 异步客户端。"""
+    """构造 mock 的 CachedLLMClient（chat_completions_create 方法）。"""
     mock_client = AsyncMock()
     if side_effect:
-        mock_client.chat.completions.create = AsyncMock(side_effect=side_effect)
+        mock_client.chat_completions_create = AsyncMock(side_effect=side_effect)
     elif response:
-        mock_client.chat.completions.create = AsyncMock(return_value=response)
+        mock_client.chat_completions_create = AsyncMock(return_value=response)
     return mock_client
 
 
@@ -363,7 +363,7 @@ class TestCoordinatorAgentRetry:
         result = await agent.generate_report([])
 
         assert result == "无工单数据，无法生成报告。"
-        mock_client.chat.completions.create.assert_not_called()
+        mock_client.chat_completions_create.assert_not_called()
 
 
 # ============================================================

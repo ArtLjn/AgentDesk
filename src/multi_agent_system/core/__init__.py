@@ -1,8 +1,10 @@
-"""核心模块：统一导出异常处理基础设施。
+"""核心模块：统一导出异常处理基础设施和缓存层。
 
-包含 retry 装饰器、降级注册表、异常层次定义和结构化日志工具。
+包含 retry 装饰器、降级注册表、异常层次定义、结构化日志工具和 LLM 缓存。
 """
 
+from src.multi_agent_system.core.cache import LLMCache, llm_cache, reset_cache
+from src.multi_agent_system.core.cached_client import CachedLLMClient
 from src.multi_agent_system.core.exceptions import (
     FallbackExhaustedError,
     NonRetryableError,
@@ -30,4 +32,8 @@ __all__ = [
     "get_trace_id",
     "generate_trace_id",
     "structured_logger",
+    "LLMCache",
+    "llm_cache",
+    "reset_cache",
+    "CachedLLMClient",
 ]
