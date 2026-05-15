@@ -4,9 +4,11 @@ import json
 import re
 
 from loguru import logger
-from openai import AsyncOpenAI
+from openai import APIConnectionError, APIError, AsyncOpenAI, AuthenticationError, RateLimitError
 
 from src.multi_agent_system.config import Settings
+from src.multi_agent_system.core import fallback_registry, with_retry
+from src.multi_agent_system.core.exceptions import NonRetryableError, RetryableError
 
 __all__ = ["ReviewerAgent"]
 
@@ -80,6 +82,8 @@ class ReviewerAgent:
     ) -> dict:
         """审核处理结果，返回评分和反馈。
 
+        重试和降级由 @with_retry 装饰器统一处理。
+
         Args:
             content: 原始工单内容
             processing_result: 处理结果文本
@@ -88,12 +92,16 @@ class ReviewerAgent:
         Returns:
             包含 score（0-1）和 feedback 的字典
         """
-        try:
-            return await self._review_by_llm(content, processing_result, category)
-        except Exception as e:
-            logger.warning(f"LLM 审核失败，使用降级评分: {e}")
-            return self._fallback_review()
+        return await self._review_by_llm(content, processing_result, category)
 
+    @with_retry(
+        max_retries=3,
+        backoff_base=2.0,
+        retryable_exceptions=(APIError, APIConnectionError, RateLimitError, RetryableError),
+        fallback=lambda self, content, processing_result, category: fallback_registry.execute(
+            "reviewer.review"
+        ),
+    )
     async def _review_by_llm(
         self,
         content: str,
@@ -101,6 +109,8 @@ class ReviewerAgent:
         category: str,
     ) -> dict:
         """通过 LLM 进行质量审核。
+
+        由 @with_retry 装饰器统一处理重试和降级逻辑。
 
         Args:
             content: 原始工单内容
@@ -111,7 +121,8 @@ class ReviewerAgent:
             审核结果字典
 
         Raises:
-            ValueError: LLM 返回的 JSON 格式无效时抛出
+            RetryableError: OpenAI API 可重试错误
+            NonRetryableError: 认证失败或 JSON 解析失败
         """
         system_prompt = _REVIEWER_SYSTEM_PROMPT.format(
             content=content,
@@ -119,22 +130,31 @@ class ReviewerAgent:
             processing_result=processing_result,
         )
 
-        logger.info(f"🤖 [Reviewer] 调用 LLM 模型: {self._model}")
-        logger.debug(f"🤖 [Reviewer] 审核内容:\n工单: {content}\n结果: {processing_result}")
+        logger.info(f"[Reviewer] 调用 LLM 模型: {self._model}")
+        logger.debug(f"[Reviewer] 审核内容:\n工单: {content}\n结果: {processing_result}")
 
-        response = await self.client.chat.completions.create(
-            model=self._model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": "请对以上处理结果进行评分"},
-            ],
-            temperature=0.2,
-            response_format={"type": "json_object"},
-        )
+        try:
+            response = await self.client.chat.completions.create(
+                model=self._model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": "请对以上处理结果进行评分"},
+                ],
+                temperature=0.2,
+                response_format={"type": "json_object"},
+            )
+        except AuthenticationError as e:
+            raise NonRetryableError(f"API 认证失败: {e}", cause=e)
+        except (APIError, APIConnectionError, RateLimitError) as e:
+            raise RetryableError(f"API 调用失败: {e}", cause=e)
 
         raw = response.choices[0].message.content or "{}"
-        logger.info(f"🤖 [Reviewer] LLM 响应: {raw}")
-        result = _parse_json_response(raw)
+        logger.info(f"[Reviewer] LLM 响应: {raw}")
+
+        try:
+            result = _parse_json_response(raw)
+        except json.JSONDecodeError as e:
+            raise NonRetryableError(f"LLM 返回非法 JSON: {e}", cause=e)
 
         score = float(result.get("score", 0.7))
         # 确保 score 在 0-1 范围内
@@ -170,3 +190,7 @@ class ReviewerAgent:
             api_key=settings.llm_api_key,
             base_url=settings.llm_base_url,
         )
+
+
+# 模块级降级注册
+fallback_registry.register("reviewer.review", ReviewerAgent._fallback_review)

@@ -3,10 +3,11 @@
 import json
 from typing import TYPE_CHECKING
 
-from loguru import logger
-from openai import AsyncOpenAI
+from openai import APIConnectionError, APIError, AsyncOpenAI, AuthenticationError, RateLimitError
 
 from src.multi_agent_system.config import Settings
+from src.multi_agent_system.core import fallback_registry, with_retry
+from src.multi_agent_system.core.exceptions import NonRetryableError, RetryableError
 
 if TYPE_CHECKING:
     from src.multi_agent_system.tools.knowledge_search import KnowledgeSearchTool
@@ -93,6 +94,8 @@ class CoordinatorAgent:
     async def escalate(self, ticket_id: str, reason: str) -> dict:
         """升级工单到人工处理。
 
+        重试和降级由 @with_retry 装饰器统一处理。
+
         Args:
             ticket_id: 工单 ID
             reason: 升级原因
@@ -100,11 +103,7 @@ class CoordinatorAgent:
         Returns:
             升级信息字典，包含摘要、建议和分配团队
         """
-        try:
-            result = await self._escalate_by_llm(ticket_id, reason)
-        except Exception as e:
-            logger.warning(f"LLM 升级分析失败，使用降级方案: {e}")
-            result = self._fallback_escalate(ticket_id, reason)
+        result = await self._escalate_by_llm(ticket_id, reason)
 
         # 发送升级通知
         self._notification_tool.send(
@@ -115,8 +114,18 @@ class CoordinatorAgent:
 
         return result
 
+    @with_retry(
+        max_retries=3,
+        backoff_base=2.0,
+        retryable_exceptions=(APIError, APIConnectionError, RateLimitError, RetryableError),
+        fallback=lambda self, ticket_id, reason: fallback_registry.execute(
+            "coordinator.escalate", ticket_id, reason
+        ),
+    )
     async def _escalate_by_llm(self, ticket_id: str, reason: str) -> dict:
         """通过 LLM 生成升级分析。
+
+        由 @with_retry 装饰器统一处理重试和降级逻辑。
 
         Args:
             ticket_id: 工单 ID
@@ -124,21 +133,34 @@ class CoordinatorAgent:
 
         Returns:
             升级分析结果字典
+
+        Raises:
+            RetryableError: OpenAI API 可重试错误
+            NonRetryableError: 认证失败或 JSON 解析失败
         """
         prompt = _ESCALATE_PROMPT.format(ticket_id=ticket_id, reason=reason)
 
-        response = await self.client.chat.completions.create(
-            model=self._model,
-            messages=[
-                {"role": "system", "content": prompt},
-                {"role": "user", "content": f"请分析工单 {ticket_id} 的升级需求"},
-            ],
-            temperature=0.2,
-            response_format={"type": "json_object"},
-        )
+        try:
+            response = await self.client.chat.completions.create(
+                model=self._model,
+                messages=[
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": f"请分析工单 {ticket_id} 的升级需求"},
+                ],
+                temperature=0.2,
+                response_format={"type": "json_object"},
+            )
+        except AuthenticationError as e:
+            raise NonRetryableError(f"API 认证失败: {e}", cause=e)
+        except (APIError, APIConnectionError, RateLimitError) as e:
+            raise RetryableError(f"API 调用失败: {e}", cause=e)
 
         raw = response.choices[0].message.content or "{}"
-        return json.loads(raw)
+
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError as e:
+            raise NonRetryableError(f"LLM 返回非法 JSON: {e}", cause=e)
 
     @staticmethod
     def _fallback_escalate(ticket_id: str, reason: str) -> dict:
@@ -160,6 +182,8 @@ class CoordinatorAgent:
     async def handle_failure(self, ticket_id: str, error: str) -> dict:
         """处理失败的工单。
 
+        重试和降级由 @with_retry 装饰器统一处理。
+
         Args:
             ticket_id: 工单 ID
             error: 错误信息
@@ -167,11 +191,7 @@ class CoordinatorAgent:
         Returns:
             失败分析字典，包含原因分析、恢复建议等
         """
-        try:
-            result = await self._analyze_failure_by_llm(ticket_id, error)
-        except Exception as e:
-            logger.warning(f"LLM 失败分析失败，使用降级方案: {e}")
-            result = self._fallback_failure(ticket_id, error)
+        result = await self._analyze_failure_by_llm(ticket_id, error)
 
         # 发送失败通知
         self._notification_tool.send(
@@ -182,8 +202,18 @@ class CoordinatorAgent:
 
         return result
 
+    @with_retry(
+        max_retries=3,
+        backoff_base=2.0,
+        retryable_exceptions=(APIError, APIConnectionError, RateLimitError, RetryableError),
+        fallback=lambda self, ticket_id, error: fallback_registry.execute(
+            "coordinator.handle_failure", ticket_id, error
+        ),
+    )
     async def _analyze_failure_by_llm(self, ticket_id: str, error: str) -> dict:
         """通过 LLM 分析失败原因。
+
+        由 @with_retry 装饰器统一处理重试和降级逻辑。
 
         Args:
             ticket_id: 工单 ID
@@ -191,21 +221,34 @@ class CoordinatorAgent:
 
         Returns:
             失败分析结果字典
+
+        Raises:
+            RetryableError: OpenAI API 可重试错误
+            NonRetryableError: 认证失败或 JSON 解析失败
         """
         prompt = _FAILURE_PROMPT.format(ticket_id=ticket_id, error=error)
 
-        response = await self.client.chat.completions.create(
-            model=self._model,
-            messages=[
-                {"role": "system", "content": prompt},
-                {"role": "user", "content": f"请分析工单 {ticket_id} 的失败原因"},
-            ],
-            temperature=0.2,
-            response_format={"type": "json_object"},
-        )
+        try:
+            response = await self.client.chat.completions.create(
+                model=self._model,
+                messages=[
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": f"请分析工单 {ticket_id} 的失败原因"},
+                ],
+                temperature=0.2,
+                response_format={"type": "json_object"},
+            )
+        except AuthenticationError as e:
+            raise NonRetryableError(f"API 认证失败: {e}", cause=e)
+        except (APIError, APIConnectionError, RateLimitError) as e:
+            raise RetryableError(f"API 调用失败: {e}", cause=e)
 
         raw = response.choices[0].message.content or "{}"
-        return json.loads(raw)
+
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError as e:
+            raise NonRetryableError(f"LLM 返回非法 JSON: {e}", cause=e)
 
     @staticmethod
     def _fallback_failure(ticket_id: str, error: str) -> dict:
@@ -227,6 +270,8 @@ class CoordinatorAgent:
     async def generate_report(self, tickets: list[dict]) -> str:
         """生成工单处理报告。
 
+        重试和降级由 @with_retry 装饰器统一处理。
+
         Args:
             tickets: 工单列表，每个工单为字典格式
 
@@ -236,32 +281,47 @@ class CoordinatorAgent:
         if not tickets:
             return "无工单数据，无法生成报告。"
 
-        try:
-            return await self._generate_report_by_llm(tickets)
-        except Exception as e:
-            logger.warning(f"LLM 报告生成失败，使用降级方案: {e}")
-            return self._fallback_report(tickets)
+        return await self._generate_report_by_llm(tickets)
 
+    @with_retry(
+        max_retries=3,
+        backoff_base=2.0,
+        retryable_exceptions=(APIError, APIConnectionError, RateLimitError, RetryableError),
+        fallback=lambda self, tickets: fallback_registry.execute(
+            "coordinator.generate_report", tickets
+        ),
+    )
     async def _generate_report_by_llm(self, tickets: list[dict]) -> str:
         """通过 LLM 生成处理报告。
+
+        由 @with_retry 装饰器统一处理重试和降级逻辑。
 
         Args:
             tickets: 工单列表
 
         Returns:
             报告文本
+
+        Raises:
+            RetryableError: OpenAI API 可重试错误
+            NonRetryableError: 认证失败
         """
         tickets_data = json.dumps(tickets, ensure_ascii=False, indent=2)
         prompt = _REPORT_PROMPT.format(tickets_data=tickets_data)
 
-        response = await self.client.chat.completions.create(
-            model=self._model,
-            messages=[
-                {"role": "system", "content": prompt},
-                {"role": "user", "content": "请生成工单处理报告"},
-            ],
-            temperature=0.3,
-        )
+        try:
+            response = await self.client.chat.completions.create(
+                model=self._model,
+                messages=[
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": "请生成工单处理报告"},
+                ],
+                temperature=0.3,
+            )
+        except AuthenticationError as e:
+            raise NonRetryableError(f"API 认证失败: {e}", cause=e)
+        except (APIError, APIConnectionError, RateLimitError) as e:
+            raise RetryableError(f"API 调用失败: {e}", cause=e)
 
         return response.choices[0].message.content or "报告生成失败"
 
@@ -334,3 +394,9 @@ class CoordinatorAgent:
             api_key=settings.llm_api_key,
             base_url=settings.llm_base_url,
         )
+
+
+# 模块级降级注册
+fallback_registry.register("coordinator.escalate", CoordinatorAgent._fallback_escalate)
+fallback_registry.register("coordinator.handle_failure", CoordinatorAgent._fallback_failure)
+fallback_registry.register("coordinator.generate_report", CoordinatorAgent._fallback_report)

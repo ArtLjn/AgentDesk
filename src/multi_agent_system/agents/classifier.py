@@ -4,9 +4,11 @@ import json
 import re
 
 from loguru import logger
-from openai import AsyncOpenAI
+from openai import APIConnectionError, APIError, AsyncOpenAI, AuthenticationError, RateLimitError
 
 from src.multi_agent_system.config import Settings
+from src.multi_agent_system.core import FallbackRegistry, fallback_registry, with_retry
+from src.multi_agent_system.core.exceptions import NonRetryableError, RetryableError
 from src.multi_agent_system.models.ticket import TicketCategory, TicketPriority
 
 __all__ = ["ClassifierAgent"]
@@ -97,20 +99,26 @@ class ClassifierAgent:
     async def classify(self, content: str) -> dict:
         """分类工单，返回分类、优先级和理由。
 
+        重试和降级由 @with_retry 装饰器统一处理。
+
         Args:
             content: 工单内容文本
 
         Returns:
             包含 category、priority、reason 的字典
         """
-        try:
-            return await self._classify_by_llm(content)
-        except Exception as e:
-            logger.warning(f"LLM 分类失败，降级到关键词匹配: {e}")
-            return self._classify_by_fallback(content)
+        return await self._classify_by_llm(content)
 
+    @with_retry(
+        max_retries=3,
+        backoff_base=2.0,
+        retryable_exceptions=(APIError, APIConnectionError, RateLimitError, RetryableError),
+        fallback=lambda self, content: fallback_registry.execute("classifier.classify", content),
+    )
     async def _classify_by_llm(self, content: str) -> dict:
         """通过 LLM 进行工单分类。
+
+        由 @with_retry 装饰器统一处理重试和降级逻辑。
 
         Args:
             content: 工单内容文本
@@ -119,24 +127,34 @@ class ClassifierAgent:
             分类结果字典
 
         Raises:
-            ValueError: LLM 返回的 JSON 格式无效时抛出
+            RetryableError: OpenAI API 可重试错误
+            NonRetryableError: 认证失败或 JSON 解析失败
         """
-        logger.info(f"🤖 [Classifier] 调用 LLM 模型: {self._model}, 内容长度: {len(content)}")
-        logger.debug(f"🤖 [Classifier] 请求提示词:\n{_CLASSIFIER_SYSTEM_PROMPT}\n用户内容: {content}")
+        logger.info(f"[Classifier] 调用 LLM 模型: {self._model}, 内容长度: {len(content)}")
+        logger.debug(f"[Classifier] 请求提示词:\n{_CLASSIFIER_SYSTEM_PROMPT}\n用户内容: {content}")
 
-        response = await self.client.chat.completions.create(
-            model=self._model,
-            messages=[
-                {"role": "system", "content": _CLASSIFIER_SYSTEM_PROMPT},
-                {"role": "user", "content": f"请分类以下工单：\n{content}"},
-            ],
-            temperature=0.1,
-            response_format={"type": "json_object"},
-        )
+        try:
+            response = await self.client.chat.completions.create(
+                model=self._model,
+                messages=[
+                    {"role": "system", "content": _CLASSIFIER_SYSTEM_PROMPT},
+                    {"role": "user", "content": f"请分类以下工单：\n{content}"},
+                ],
+                temperature=0.1,
+                response_format={"type": "json_object"},
+            )
+        except AuthenticationError as e:
+            raise NonRetryableError(f"API 认证失败: {e}", cause=e)
+        except (APIError, APIConnectionError, RateLimitError) as e:
+            raise RetryableError(f"API 调用失败: {e}", cause=e)
 
         raw = response.choices[0].message.content or "{}"
-        logger.info(f"🤖 [Classifier] LLM 响应: {raw}")
-        result = _parse_json_response(raw)
+        logger.info(f"[Classifier] LLM 响应: {raw}")
+
+        try:
+            result = _parse_json_response(raw)
+        except json.JSONDecodeError as e:
+            raise NonRetryableError(f"LLM 返回非法 JSON: {e}", cause=e)
 
         # 校验字段存在且值合法
         category = result.get("category", "")
@@ -194,3 +212,7 @@ class ClassifierAgent:
             api_key=settings.llm_api_key,
             base_url=settings.llm_base_url,
         )
+
+
+# 模块级降级注册：将关键词匹配降级函数注册到全局注册表
+fallback_registry.register("classifier.classify", ClassifierAgent._classify_by_fallback)

@@ -5,9 +5,11 @@ import re
 from typing import TYPE_CHECKING
 
 from loguru import logger
-from openai import AsyncOpenAI
+from openai import APIConnectionError, APIError, AsyncOpenAI, AuthenticationError, RateLimitError
 
 from src.multi_agent_system.config import Settings
+from src.multi_agent_system.core import fallback_registry, with_retry
+from src.multi_agent_system.core.exceptions import NonRetryableError, RetryableError
 from src.multi_agent_system.models.ticket import TicketCategory
 
 if TYPE_CHECKING:
@@ -106,14 +108,10 @@ class ProcessorAgent:
         if context:
             knowledge_context = f"{knowledge_context}\n附加上下文：{context}"
 
-        # 3. LLM 生成解决方案
-        try:
-            return await self._generate_solution(
-                content, category, priority, knowledge_context
-            )
-        except Exception as e:
-            logger.warning(f"LLM 处理失败，使用降级方案: {e}")
-            return self._fallback_process(content, category, priority)
+        # 3. LLM 生成解决方案（重试和降级由 @with_retry 装饰器处理）
+        return await self._generate_solution(
+            content, category, priority, knowledge_context
+        )
 
     def _search_knowledge(self, query: str) -> list[dict]:
         """检索知识库获取相关资料。
@@ -151,6 +149,14 @@ class ProcessorAgent:
 
         return "参考资料：\n" + "\n".join(parts)
 
+    @with_retry(
+        max_retries=3,
+        backoff_base=2.0,
+        retryable_exceptions=(APIError, APIConnectionError, RateLimitError, RetryableError),
+        fallback=lambda self, content, category, priority, knowledge_context="": fallback_registry.execute(
+            "processor.generate_solution", content, category, priority
+        ),
+    )
     async def _generate_solution(
         self,
         content: str,
@@ -160,6 +166,8 @@ class ProcessorAgent:
     ) -> dict:
         """通过 LLM 生成解决方案。
 
+        由 @with_retry 装饰器统一处理重试和降级逻辑。
+
         Args:
             content: 工单内容
             category: 工单分类
@@ -168,6 +176,10 @@ class ProcessorAgent:
 
         Returns:
             包含 result 和 references 的字典
+
+        Raises:
+            RetryableError: OpenAI API 可重试错误
+            NonRetryableError: 认证失败或 JSON 解析失败
         """
         context_section = (
             f"\n{knowledge_context}" if knowledge_context else "\n（无相关参考资料）"
@@ -179,22 +191,31 @@ class ProcessorAgent:
             context_section=context_section,
         )
 
-        logger.info(f"🤖 [Processor] 调用 LLM 模型: {self._model}")
-        logger.debug(f"🤖 [Processor] 知识库上下文:\n{knowledge_context}")
+        logger.info(f"[Processor] 调用 LLM 模型: {self._model}")
+        logger.debug(f"[Processor] 知识库上下文:\n{knowledge_context}")
 
-        response = await self.client.chat.completions.create(
-            model=self._model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"请处理以下工单：\n{content}"},
-            ],
-            temperature=0.3,
-            response_format={"type": "json_object"},
-        )
+        try:
+            response = await self.client.chat.completions.create(
+                model=self._model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": f"请处理以下工单：\n{content}"},
+                ],
+                temperature=0.3,
+                response_format={"type": "json_object"},
+            )
+        except AuthenticationError as e:
+            raise NonRetryableError(f"API 认证失败: {e}", cause=e)
+        except (APIError, APIConnectionError, RateLimitError) as e:
+            raise RetryableError(f"API 调用失败: {e}", cause=e)
 
         raw = response.choices[0].message.content or "{}"
-        logger.info(f"🤖 [Processor] LLM 响应: {raw}")
-        result = _parse_json_response(raw)
+        logger.info(f"[Processor] LLM 响应: {raw}")
+
+        try:
+            result = _parse_json_response(raw)
+        except json.JSONDecodeError as e:
+            raise NonRetryableError(f"LLM 返回非法 JSON: {e}", cause=e)
 
         return {
             "result": result.get("result", "处理完成，但未生成明确方案"),
@@ -250,3 +271,7 @@ class ProcessorAgent:
             api_key=settings.llm_api_key,
             base_url=settings.llm_base_url,
         )
+
+
+# 模块级降级注册
+fallback_registry.register("processor.generate_solution", ProcessorAgent._fallback_process)

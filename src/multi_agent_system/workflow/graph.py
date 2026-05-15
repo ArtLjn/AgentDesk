@@ -21,11 +21,11 @@ if TYPE_CHECKING:
 
 __all__ = ["build_ticket_graph", "create_initial_state"]
 
-# 审核通过阈值
-_REVIEW_THRESHOLD = 0.7
 
-# 最大重试次数
-_MAX_RETRIES = 3
+def _get_settings() -> Settings:
+    """获取配置单例。"""
+    return Settings()
+
 
 # 占位分类关键词映射：关键词 -> (分类, 优先级)
 _CLASSIFY_RULES: dict[str, tuple[str, str]] = {
@@ -94,34 +94,32 @@ async def receive(state: TicketState) -> dict:
 
 
 async def classify(state: TicketState) -> dict:
-    """分类节点：优先使用 ClassifierAgent，失败时降级到关键词匹配。"""
+    """分类节点：优先使用 ClassifierAgent，不可用时降级到关键词匹配。
+
+    Agent 内部的重试和降级由 @with_retry 装饰器统一处理，
+    此处仅保留 Agent 实例不可用时的占位实现。
+    """
     with log_context(agent="classifier"):
         content = state["content"]
 
-        # 尝试使用 Agent 分类
+        # Agent 可用时，直接调用（重试/降级由装饰器处理）
         if _classifier_agent is not None:
-            try:
-                result = await _classifier_agent.classify(content)
-                category = result["category"]
-                priority = result["priority"]
-                reason = result.get("reason", "")
-                return {
-                    "category": category,
-                    "priority": priority,
-                    "status": "classifying",
-                    "messages": state["messages"]
-                    + [
-                        {
-                            "role": "classifier",
-                            "content": f"分类结果: {category}, 优先级: {priority}, 理由: {reason}",
-                        }
-                    ],
-                }
-            except Exception as e:
-                # Agent 调用失败，降级到占位实现
-                from loguru import logger
-
-                logger.warning(f"ClassifierAgent 调用失败，降级到关键词匹配: {e}")
+            result = await _classifier_agent.classify(content)
+            category = result["category"]
+            priority = result["priority"]
+            reason = result.get("reason", "")
+            return {
+                "category": category,
+                "priority": priority,
+                "status": "classifying",
+                "messages": state["messages"]
+                + [
+                    {
+                        "role": "classifier",
+                        "content": f"分类结果: {category}, 优先级: {priority}, 理由: {reason}",
+                    }
+                ],
+            }
 
         # 占位分类：关键词匹配
         for keyword, (category, priority) in _CLASSIFY_RULES.items():
@@ -164,27 +162,26 @@ async def route(state: TicketState) -> dict:
 
 
 async def process(state: TicketState) -> dict:
-    """处理节点：优先使用 ProcessorAgent，失败时降级到占位实现。"""
+    """处理节点：优先使用 ProcessorAgent，不可用时降级到占位实现。
+
+    Agent 内部的重试和降级由 @with_retry 装饰器统一处理，
+    此处仅保留 Agent 实例不可用时的占位实现。
+    """
     with log_context(agent="processor"):
         category = state.get("category", "")
         priority = state.get("priority", "P3")
         content = state["content"]
 
-        # 尝试使用 Agent 处理
+        # Agent 可用时，直接调用（重试/降级由装饰器处理）
         if _processor_agent is not None:
-            try:
-                result = await _processor_agent.process(content, category, priority)
-                processing_result = result["result"]
-                return {
-                    "processing_result": processing_result,
-                    "status": "processing",
-                    "messages": state["messages"]
-                    + [{"role": "processor", "content": processing_result}],
-                }
-            except Exception as e:
-                from loguru import logger
-
-                logger.warning(f"ProcessorAgent 调用失败，降级到占位处理: {e}")
+            result = await _processor_agent.process(content, category, priority)
+            processing_result = result["result"]
+            return {
+                "processing_result": processing_result,
+                "status": "processing",
+                "messages": state["messages"]
+                + [{"role": "processor", "content": processing_result}],
+            }
 
         # 占位处理：根据分类生成模拟结果
         result_map = {
@@ -204,33 +201,32 @@ async def process(state: TicketState) -> dict:
 
 
 async def review(state: TicketState) -> dict:
-    """审核节点：优先使用 ReviewerAgent，失败时降级到占位评分。"""
+    """审核节点：优先使用 ReviewerAgent，不可用时降级到占位评分。
+
+    Agent 内部的重试和降级由 @with_retry 装饰器统一处理，
+    此处仅保留 Agent 实例不可用时的占位实现。
+    """
     with log_context(agent="reviewer"):
         retry_count = state.get("retry_count", 0)
         content = state["content"]
         processing_result = state.get("processing_result", "")
         category = state.get("category", "")
 
-        # 尝试使用 Agent 审核
+        # Agent 可用时，直接调用（重试/降级由装饰器处理）
         if _reviewer_agent is not None:
-            try:
-                result = await _reviewer_agent.review(content, processing_result, category)
-                score = result["score"]
-                return {
-                    "review_score": score,
-                    "status": "reviewing",
-                    "messages": state["messages"]
-                    + [
-                        {
-                            "role": "reviewer",
-                            "content": f"审核评分: {score:.2f}, 反馈: {result.get('feedback', '')}",
-                        }
-                    ],
-                }
-            except Exception as e:
-                from loguru import logger
-
-                logger.warning(f"ReviewerAgent 调用失败，降级到占位评分: {e}")
+            result = await _reviewer_agent.review(content, processing_result, category)
+            score = result["score"]
+            return {
+                "review_score": score,
+                "status": "reviewing",
+                "messages": state["messages"]
+                + [
+                    {
+                        "role": "reviewer",
+                        "content": f"审核评分: {score:.2f}, 反馈: {result.get('feedback', '')}",
+                    }
+                ],
+            }
 
         # 占位审核：重试次数越多，评分越低
         base_score = 0.85
@@ -300,7 +296,7 @@ async def complete(state: TicketState) -> dict:
 async def handle_failure(state: TicketState) -> dict:
     """失败处理节点：标记工单状态为失败。"""
     with log_context(agent="failure_handler"):
-        error_msg = f"工单处理失败，已达最大重试次数({_MAX_RETRIES}次)"
+        error_msg = f"工单处理失败，已达最大重试次数({_get_settings().max_retries}次)"
         return {
             "status": "failed",
             "error": error_msg,
@@ -340,7 +336,7 @@ def review_decision(state: TicketState) -> Literal["notify", "retry_check"]:
     - score < 阈值 -> retry_check（重试检查）
     """
     score = state.get("review_score", 0.0)
-    if score >= _REVIEW_THRESHOLD:
+    if score >= _get_settings().review_threshold:
         return "notify"
     return "retry_check"
 
@@ -352,7 +348,7 @@ def retry_decision(state: TicketState) -> Literal["process", "handle_failure"]:
     - retry_count >= 3 -> handle_failure（放弃）
     """
     retry_count = state.get("retry_count", 0)
-    if retry_count < _MAX_RETRIES:
+    if retry_count < _get_settings().max_retries:
         return "process"
     return "handle_failure"
 

@@ -8,7 +8,7 @@ from src.multi_agent_system.core.exceptions import (
     NonRetryableError,
     RetryableError,
 )
-from src.multi_agent_system.core.fallback import FallbackRegistry
+from src.multi_agent_system.core.fallback import FallbackRegistry, fallback_registry
 from src.multi_agent_system.core.logging import (
     generate_trace_id,
     get_trace_id,
@@ -21,6 +21,7 @@ from src.multi_agent_system.core.retry import with_retry
 __all__ = [
     "with_retry",
     "FallbackRegistry",
+    "fallback_registry",
     "RetryableError",
     "NonRetryableError",
     "FallbackExhaustedError",

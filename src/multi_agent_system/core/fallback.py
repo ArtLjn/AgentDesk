@@ -91,3 +91,7 @@ class FallbackRegistry:
         # 所有降级函数均失败
         logger.error(f"[FallbackRegistry] 所有降级函数均失败: {name}")
         return {"error": "no fallback available", _FALLBACK_MARKER: True}
+
+
+# 全局降级注册表单例
+fallback_registry = FallbackRegistry()
