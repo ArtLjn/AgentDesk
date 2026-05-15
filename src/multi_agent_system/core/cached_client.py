@@ -3,12 +3,14 @@
 自动缓存 chat.completions 调用结果，减少重复 Token 消耗。
 """
 
+import time
 from typing import Any
 
 from loguru import logger
 from openai import AsyncOpenAI
 
 from src.multi_agent_system.config import Settings
+from src.multi_agent_system.core.metrics import LLM_CALL_DURATION, LLM_CALLS_TOTAL
 
 __all__ = ["CachedLLMClient"]
 
@@ -73,12 +75,17 @@ class CachedLLMClient:
         # 缓存未启用或显式禁用缓存，直接调用
         if llm_cache is None or not cache:
             logger.debug(f"[CachedLLMClient] 跳过缓存，直接调用 {use_model}")
-            return await self.client.chat.completions.create(
-                model=use_model,
-                messages=messages,
-                temperature=temperature,
-                **kwargs,
-            )
+            start = time.perf_counter()
+            try:
+                return await self.client.chat.completions.create(
+                    model=use_model,
+                    messages=messages,
+                    temperature=temperature,
+                    **kwargs,
+                )
+            finally:
+                LLM_CALLS_TOTAL.labels(model=use_model, task_type=task_type or "unknown").inc()
+                LLM_CALL_DURATION.labels(model=use_model).observe(time.perf_counter() - start)
 
         # 生成缓存键
         cache_key = llm_cache._generate_key(
@@ -96,12 +103,17 @@ class CachedLLMClient:
 
         # 缓存未命中，调用 API
         logger.debug(f"[CachedLLMClient] 缓存未命中，调用 {use_model}")
-        result = await self.client.chat.completions.create(
-            model=use_model,
-            messages=messages,
-            temperature=temperature,
-            **kwargs,
-        )
+        start = time.perf_counter()
+        try:
+            result = await self.client.chat.completions.create(
+                model=use_model,
+                messages=messages,
+                temperature=temperature,
+                **kwargs,
+            )
+        finally:
+            LLM_CALLS_TOTAL.labels(model=use_model, task_type=task_type or "unknown").inc()
+            LLM_CALL_DURATION.labels(model=use_model).observe(time.perf_counter() - start)
 
         # 缓存结果
         llm_cache.set(cache_key, result)
