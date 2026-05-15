@@ -185,6 +185,10 @@ class TestLLMCacheClear:
 class TestGlobalCache:
     """全局缓存单例测试。"""
 
+    def setup_method(self) -> None:
+        """每个测试方法前重置全局缓存。"""
+        reset_cache()
+
     def teardown_method(self) -> None:
         """每个测试方法后重置全局缓存。"""
         reset_cache()
