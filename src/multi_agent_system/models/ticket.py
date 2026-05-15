@@ -7,6 +7,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 __all__ = [
+    "BatchTicketCreate",
     "TicketCategory",
     "TicketCreate",
     "TicketPriority",
@@ -74,3 +75,9 @@ class TicketStatusUpdate(BaseModel):
     status: TicketStatus
     message: str
     timestamp: datetime = Field(default_factory=datetime.now)
+
+
+class BatchTicketCreate(BaseModel):
+    """批量提交工单请求。"""
+
+    tickets: list[TicketCreate] = Field(..., min_length=1, max_length=50)

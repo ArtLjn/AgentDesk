@@ -1,10 +1,11 @@
-"""核心模块：统一导出异常处理基础设施和缓存层。
+"""核心模块：统一导出异常处理基础设施、缓存层和并发执行工具。
 
-包含 retry 装饰器、降级注册表、异常层次定义、结构化日志工具和 LLM 缓存。
+包含 retry 装饰器、降级注册表、异常层次定义、结构化日志工具、LLM 缓存和并发执行。
 """
 
 from src.multi_agent_system.core.cache import LLMCache, llm_cache, reset_cache
 from src.multi_agent_system.core.cached_client import CachedLLMClient
+from src.multi_agent_system.core.concurrent import concurrent_execute, run_with_semaphore
 from src.multi_agent_system.core.model_router import (
     ModelRouter,
     get_model_router,
@@ -44,4 +45,6 @@ __all__ = [
     "ModelRouter",
     "get_model_router",
     "reset_model_router",
+    "concurrent_execute",
+    "run_with_semaphore",
 ]

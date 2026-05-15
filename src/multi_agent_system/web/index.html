@@ -400,6 +400,105 @@
     <script>
         const $ = id => document.getElementById(id);
 
+        // ── 实时刷新状态 ──
+        let currentViewingTicket = null;
+        let ws = null;
+        let wsReconnectTimer = null;
+        let refreshTimer = null;
+
+        // 防抖刷新：避免同一时间窗口内多次 WS 消息触发大量 API 请求
+        function scheduleRefresh(ticketId) {
+            if (refreshTimer) clearTimeout(refreshTimer);
+            refreshTimer = setTimeout(() => {
+                loadTickets();
+                loadAnalytics();
+                // 如果当前正在查看这个工单，刷新详情
+                if (ticketId && currentViewingTicket === ticketId) {
+                    showDetailSilent(ticketId);
+                }
+            }, 300);
+        }
+
+        // 静默刷新详情（不重新触发 active 高亮）
+        async function showDetailSilent(ticketId) {
+            const data = await api(`/api/tickets/${ticketId}`);
+            if (!data) return;
+            renderDetail(data);
+        }
+
+        // 渲染工单详情（抽取公共逻辑）
+        function renderDetail(data) {
+            $('detailEmpty').style.display = 'none';
+            $('detailContent').style.display = 'block';
+            $('dTicketId').textContent = data.ticket_id;
+            $('dStatus').innerHTML = `<span class="badge badge-${data.status}">${data.status}</span>`;
+            $('dCategory').innerHTML = data.category ? `<span class="badge badge-${data.category}">${data.category}</span>` : '-';
+            $('dPriority').innerHTML = data.priority ? `<span class="badge badge-${data.priority}">${data.priority}</span>` : '-';
+            $('dContent').textContent = data.content;
+            $('dResult').textContent = data.processing_result || '等待处理';
+            $('dScore').textContent = data.review_score != null ? data.review_score.toFixed(2) : '-';
+            $('dRetry').textContent = `${data.retry_count} / 3`;
+
+            const msgChain = $('dMessages');
+            const msgs = [];
+            if (data.status) msgs.push({ role: 'system', content: `工单创建，状态: ${data.status}` });
+            if (data.category) msgs.push({ role: 'classifier', content: `分类结果: ${data.category} | 优先级: ${data.priority || '-'}` });
+            if (data.processing_result) msgs.push({ role: 'processor', content: data.processing_result });
+            if (data.review_score != null) msgs.push({ role: 'reviewer', content: `审核评分: ${data.review_score.toFixed(2)} ${data.review_score >= 0.7 ? '(通过)' : '(未通过)'}` });
+            if (data.error) msgs.push({ role: 'coordinator', content: `错误: ${data.error}` });
+            if (data.retry_count > 0) msgs.push({ role: 'system', content: `已重试 ${data.retry_count} 次` });
+
+            if (msgs.length > 0) {
+                msgChain.innerHTML = msgs.map(m => `
+                    <div class="msg-item">
+                        <span class="msg-role">[${m.role}]</span>
+                        <div class="msg-content">${m.content}</div>
+                    </div>
+                `).join('');
+            } else {
+                msgChain.innerHTML = '<div style="color:#484f58">等待处理中...</div>';
+            }
+        }
+
+        // ── WebSocket 连接 ──
+        function connectWS() {
+            if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) return;
+
+            const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const url = `${protocol}//${location.host}/api/ws/monitor`;
+            ws = new WebSocket(url);
+
+            ws.onopen = () => {
+                log('WebSocket', '已连接全局监控');
+                if (wsReconnectTimer) { clearInterval(wsReconnectTimer); wsReconnectTimer = null; }
+            };
+
+            ws.onmessage = (event) => {
+                try {
+                    const update = JSON.parse(event.data);
+                    log(`WS 推送 [${update.node || '?'}]`, update);
+                    // 显示实时通知
+                    toast(`${update.message} (${update.ticket_id})`);
+                    // 防抖刷新列表 + 统计 + 详情
+                    scheduleRefresh(update.ticket_id);
+                } catch (e) {
+                    log('WS 解析错误', e.message);
+                }
+            };
+
+            ws.onclose = () => {
+                log('WebSocket', '连接断开，3秒后重连...');
+                ws = null;
+                if (!wsReconnectTimer) {
+                    wsReconnectTimer = setInterval(() => {
+                        if (!ws || ws.readyState === WebSocket.CLOSED) connectWS();
+                    }, 3000);
+                }
+            };
+
+            ws.onerror = () => ws.close();
+        }
+
         function toast(msg, type = 'success') {
             const el = document.createElement('div');
             el.className = `toast ${type}`;
@@ -476,7 +575,7 @@
             if (data) {
                 toast(`工单已创建: ${data.ticket_id}`);
                 $('ticketContent').value = '';
-                setTimeout(loadTickets, 2000);
+                loadTickets();
             }
         }
 
@@ -509,39 +608,10 @@
         }
 
         async function showDetail(ticketId, el) {
+            currentViewingTicket = ticketId;
             const data = await api(`/api/tickets/${ticketId}`);
             if (!data) return;
-            $('detailEmpty').style.display = 'none';
-            $('detailContent').style.display = 'block';
-            $('dTicketId').textContent = data.ticket_id;
-            $('dStatus').innerHTML = `<span class="badge badge-${data.status}">${data.status}</span>`;
-            $('dCategory').innerHTML = data.category ? `<span class="badge badge-${data.category}">${data.category}</span>` : '-';
-            $('dPriority').innerHTML = data.priority ? `<span class="badge badge-${data.priority}">${data.priority}</span>` : '-';
-            $('dContent').textContent = data.content;
-            $('dResult').textContent = data.processing_result || '等待处理';
-            $('dScore').textContent = data.review_score != null ? data.review_score.toFixed(2) : '-';
-            $('dRetry').textContent = `${data.retry_count} / 3`;
-
-            const msgChain = $('dMessages');
-            const msgs = [];
-            if (data.status) msgs.push({ role: 'system', content: `工单创建，状态: ${data.status}` });
-            if (data.category) msgs.push({ role: 'classifier', content: `分类结果: ${data.category} | 优先级: ${data.priority || '-'}` });
-            if (data.processing_result) msgs.push({ role: 'processor', content: data.processing_result });
-            if (data.review_score != null) msgs.push({ role: 'reviewer', content: `审核评分: ${data.review_score.toFixed(2)} ${data.review_score >= 0.7 ? '(通过)' : '(未通过)'}` });
-            if (data.error) msgs.push({ role: 'coordinator', content: `错误: ${data.error}` });
-            if (data.retry_count > 0) msgs.push({ role: 'system', content: `已重试 ${data.retry_count} 次` });
-
-            if (msgs.length > 0) {
-                msgChain.innerHTML = msgs.map(m => `
-                    <div class="msg-item">
-                        <span class="msg-role">[${m.role}]</span>
-                        <div class="msg-content">${m.content}</div>
-                    </div>
-                `).join('');
-            } else {
-                msgChain.innerHTML = '<div style="color:#484f58">等待处理中...</div>';
-            }
-
+            renderDetail(data);
             document.querySelectorAll('.ticket-item').forEach(e => e.classList.remove('active'));
             if (el) el.classList.add('active');
         }
@@ -580,8 +650,9 @@
 
         // 页面加载后自动初始化
         checkHealth();
-        setTimeout(loadTickets, 500);
-        setTimeout(loadAnalytics, 800);
+        loadTickets();
+        loadAnalytics();
+        connectWS();
     </script>
 </body>
 </html>

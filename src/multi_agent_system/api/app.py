@@ -4,7 +4,6 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from loguru import logger
 
@@ -84,12 +83,56 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# 自定义 CORS 中间件：HTTP 正常添加跨域头，WebSocket 直接放行
+# Starlette 自带的 CORSMiddleware 会拦截 WebSocket 的 Origin 检查导致 403
+
+
+class _CORSAllowAll:
+    """ASGI 中间件：允许所有来源的 HTTP 和 WebSocket 请求。"""
+
+    def __init__(self, app):  # noqa: ANN001
+        self.app = app
+
+    async def __call__(self, scope, receive, send):  # noqa: ANN001
+        if scope["type"] == "websocket":
+            # WebSocket 直通，不做 Origin 检查
+            await self.app(scope, receive, send)
+            return
+
+        if scope["type"] == "http":
+            # 处理预检请求
+            if scope.get("method") == "OPTIONS":
+                from starlette.responses import Response
+
+                response = Response(
+                    status_code=204,
+                    headers={
+                        "access-control-allow-origin": "*",
+                        "access-control-allow-methods": "*",
+                        "access-control-allow-headers": "*",
+                        "access-control-max-age": "86400",
+                    },
+                )
+                await response(scope, receive, send)
+                return
+
+            # 给正常响应注入 CORS 头
+            async def _send_with_cors(message):  # noqa: ANN001
+                if message["type"] == "http.response.start":
+                    headers = list(message.get("headers", []))
+                    headers.append((b"access-control-allow-origin", b"*"))
+                    headers.append((b"access-control-allow-methods", b"*"))
+                    headers.append((b"access-control-allow-headers", b"*"))
+                    message["headers"] = headers
+                await send(message)
+
+            await self.app(scope, receive, _send_with_cors)
+            return
+
+        await self.app(scope, receive, send)
+
+
+app.add_middleware(_CORSAllowAll)
 
 # 注册路由
 from src.multi_agent_system.api.routes import router  # noqa: E402

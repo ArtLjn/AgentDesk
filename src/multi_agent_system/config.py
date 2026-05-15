@@ -34,6 +34,9 @@ class Settings(BaseSettings):
     max_retries: int = 3
     review_threshold: float = 0.7
 
+    # 并发配置
+    max_concurrency: int = 5
+
     # 模型路由配置
     model_routes: dict[str, str] = {
         "classify": "qwen3:4b",
