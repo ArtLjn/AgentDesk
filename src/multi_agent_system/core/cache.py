@@ -12,6 +12,8 @@ from typing import Any
 from cachetools import LRUCache
 from loguru import logger
 
+from src.multi_agent_system.core.metrics import CACHE_HIT_RATE, CACHE_QUERIES_TOTAL, CACHE_SIZE
+
 __all__ = ["LLMCache", "llm_cache"]
 
 
@@ -46,15 +48,21 @@ class LLMCache:
         entry = self.cache.get(key)
         if entry is None:
             self.misses += 1
+            CACHE_QUERIES_TOTAL.labels(result="miss").inc()
+            CACHE_HIT_RATE.set(self.hit_rate)
             return None
 
         value, expire_at = entry
         if time.time() > expire_at:
             del self.cache[key]
             self.misses += 1
+            CACHE_QUERIES_TOTAL.labels(result="miss").inc()
+            CACHE_HIT_RATE.set(self.hit_rate)
             return None
 
         self.hits += 1
+        CACHE_QUERIES_TOTAL.labels(result="hit").inc()
+        CACHE_HIT_RATE.set(self.hit_rate)
         return value
 
     def set(self, key: str, value: Any, ttl: int | None = None) -> None:
@@ -63,12 +71,15 @@ class LLMCache:
             ttl = self.ttl
         expire_at = time.time() + ttl
         self.cache[key] = (value, expire_at)
+        CACHE_SIZE.set(len(self.cache))
 
     def clear(self) -> None:
         """清空缓存。"""
         self.cache.clear()
         self.hits = 0
         self.misses = 0
+        CACHE_SIZE.set(0)
+        CACHE_HIT_RATE.set(0.0)
 
     @property
     def hit_rate(self) -> float:
