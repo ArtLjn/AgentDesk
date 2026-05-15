@@ -18,8 +18,8 @@ COPY src/ src/
 # 脚本（知识库初始化等）
 COPY scripts/ scripts/
 
-# 数据目录（知识库向量数据等）
-COPY data/ data/
+# 数据目录（运行时通过 volume 挂载，镜像中仅创建空目录）
+RUN mkdir -p data
 
 # 环境变量通过 docker-compose 或运行时注入，不打包进镜像
 EXPOSE 8000
