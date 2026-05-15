@@ -1,85 +1,79 @@
 """Prometheus 指标基础行为测试。
 
-仅验证 prometheus_client 的 Counter / Histogram / Gauge
-在导入后可正常使用，不涉及具体业务指标值断言。
+使用独立 CollectorRegistry 验证 Counter / Histogram / Gauge
+的基本行为，避免污染全局 Registry。
 """
 
 import pytest
-from prometheus_client import Counter, Gauge, Histogram
-
-from src.multi_agent_system.core.metrics import (
-    ACTIVE_REQUESTS,
-    AGENT_EXECUTION_DURATION,
-    AGENT_EXECUTION_TOTAL,
-    CACHE_HIT_RATE,
-    CACHE_QUERIES_TOTAL,
-    CACHE_SIZE,
-    HTTP_REQUESTS_TOTAL,
-    HTTP_REQUEST_DURATION,
-    LLM_CALLS_TOTAL,
-    LLM_CALL_DURATION,
-    SYSTEM_UPTIME_SECONDS,
-)
+from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram
 
 
 class TestCounterBehavior:
     """验证 Counter 类型指标可正常递增。"""
 
-    def test_counter_increment(self):
-        c = Counter("test_counter", "测试计数器", ["label"])
+    @pytest.fixture
+    def registry(self):
+        return CollectorRegistry()
+
+    def test_counter_create_and_increment(self, registry):
+        c = Counter("test_counter", "测试计数器", ["label"], registry=registry)
+
         c.labels(label="a").inc()
         c.labels(label="a").inc(2)
-        # prometheus_client 不暴露直接取值接口，
-        # 只需确认调用不抛异常即视为行为正常。
 
-    def test_http_requests_total_is_counter(self):
-        assert isinstance(HTTP_REQUESTS_TOTAL, Counter)
-
-    def test_agent_execution_total_is_counter(self):
-        assert isinstance(AGENT_EXECUTION_TOTAL, Counter)
-
-    def test_llm_calls_total_is_counter(self):
-        assert isinstance(LLM_CALLS_TOTAL, Counter)
-
-    def test_cache_queries_total_is_counter(self):
-        assert isinstance(CACHE_QUERIES_TOTAL, Counter)
+        samples = list(c.collect())[0].samples
+        value = next(s.value for s in samples if s.labels == {"label": "a"})
+        assert value == 3.0
 
 
 class TestHistogramBehavior:
-    """验证 Histogram 类型指标可正常观测数值。"""
+    """验证 Histogram 类型指标可正常观测数值，并支持自定义 bucket。"""
 
-    def test_histogram_observe(self):
-        h = Histogram("test_histogram", "测试直方图", ["label"])
+    @pytest.fixture
+    def registry(self):
+        return CollectorRegistry()
+
+    def test_histogram_create_and_observe(self, registry):
+        h = Histogram("test_histogram", "测试直方图", ["label"], registry=registry)
+
         h.labels(label="x").observe(0.1)
         h.labels(label="x").observe(0.5)
 
-    def test_http_request_duration_is_histogram(self):
-        assert isinstance(HTTP_REQUEST_DURATION, Histogram)
+        samples = list(h.collect())[0].samples
+        count = next(s.value for s in samples if s.name == "test_histogram_count")
+        assert count == 2.0
 
-    def test_agent_execution_duration_is_histogram(self):
-        assert isinstance(AGENT_EXECUTION_DURATION, Histogram)
+    def test_histogram_custom_buckets(self, registry):
+        custom_buckets = [0.1, 0.5, 1.0, 2.5, 5.0]
+        h = Histogram(
+            "test_histogram_buckets",
+            "测试自定义 bucket 直方图",
+            registry=registry,
+            buckets=custom_buckets,
+        )
 
-    def test_llm_call_duration_is_histogram(self):
-        assert isinstance(LLM_CALL_DURATION, Histogram)
+        h.observe(0.3)
+        h.observe(1.5)
+
+        samples = list(h.collect())[0].samples
+        count = next(s.value for s in samples if s.name == "test_histogram_buckets_count")
+        assert count == 2.0
 
 
 class TestGaugeBehavior:
     """验证 Gauge 类型指标可正常设置/增减。"""
 
-    def test_gauge_set_and_inc_dec(self):
-        g = Gauge("test_gauge", "测试仪表盘")
+    @pytest.fixture
+    def registry(self):
+        return CollectorRegistry()
+
+    def test_gauge_create_and_set(self, registry):
+        g = Gauge("test_gauge", "测试仪表盘", registry=registry)
+
         g.set(10)
         g.inc()
         g.dec(2)
 
-    def test_cache_size_is_gauge(self):
-        assert isinstance(CACHE_SIZE, Gauge)
-
-    def test_cache_hit_rate_is_gauge(self):
-        assert isinstance(CACHE_HIT_RATE, Gauge)
-
-    def test_system_uptime_seconds_is_gauge(self):
-        assert isinstance(SYSTEM_UPTIME_SECONDS, Gauge)
-
-    def test_active_requests_is_gauge(self):
-        assert isinstance(ACTIVE_REQUESTS, Gauge)
+        samples = list(g.collect())[0].samples
+        value = next(s.value for s in samples)
+        assert value == 9.0

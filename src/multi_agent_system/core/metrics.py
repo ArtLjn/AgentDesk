@@ -19,6 +19,7 @@ HTTP_REQUEST_DURATION = Histogram(
     "multi_agent_http_request_duration_seconds",
     "HTTP 请求处理耗时",
     ["method", "endpoint"],
+    buckets=[0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0],
 )
 
 HTTP_REQUESTS_TOTAL = Counter(
@@ -37,6 +38,7 @@ AGENT_EXECUTION_DURATION = Histogram(
     "multi_agent_agent_execution_duration_seconds",
     "Agent 执行耗时",
     ["agent_name"],
+    buckets=[0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0],
 )
 
 LLM_CALLS_TOTAL = Counter(
@@ -49,6 +51,7 @@ LLM_CALL_DURATION = Histogram(
     "multi_agent_llm_call_duration_seconds",
     "LLM 调用耗时",
     ["model"],
+    buckets=[0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 15.0, 20.0, 30.0, 60.0],
 )
 
 CACHE_QUERIES_TOTAL = Counter(
