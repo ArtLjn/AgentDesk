@@ -43,18 +43,23 @@ class LLMCache:
 
     def get(self, key: str) -> Any | None:
         """获取缓存，过期返回 None。"""
+        from src.multi_agent_system.core.metrics import metrics_collector
+
         entry = self.cache.get(key)
         if entry is None:
             self.misses += 1
+            metrics_collector.update_cache_hit_rate(self.hits, self.hits + self.misses)
             return None
 
         value, expire_at = entry
         if time.time() > expire_at:
             del self.cache[key]
             self.misses += 1
+            metrics_collector.update_cache_hit_rate(self.hits, self.hits + self.misses)
             return None
 
         self.hits += 1
+        metrics_collector.update_cache_hit_rate(self.hits, self.hits + self.misses)
         return value
 
     def set(self, key: str, value: Any, ttl: int | None = None) -> None:
