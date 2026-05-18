@@ -91,19 +91,28 @@ class MetricsMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         """处理请求并记录指标。"""
         from src.multi_agent_system.core.metrics import metrics_collector
+
+        metrics_collector.active_requests.inc()
         start = time.time()
-        is_error = False
+        status_code = 500
         try:
             response = await call_next(request)
-            if response.status_code >= 500:
-                is_error = True
+            status_code = response.status_code
             return response
         except Exception:
-            is_error = True
+            status_code = 500
             raise
         finally:
-            duration_ms = (time.time() - start) * 1000
-            metrics_collector.record_request(duration_ms, is_error)
+            duration = time.time() - start
+            endpoint = request.url.path
+            metrics_collector.record_http_request(
+                method=request.method,
+                endpoint=endpoint,
+                status_code=status_code,
+                duration_seconds=duration,
+            )
+            metrics_collector.active_requests.dec()
+            metrics_collector.update_uptime()
 
 
 app = FastAPI(
@@ -199,6 +208,19 @@ async def health_check() -> dict:
 
 @app.get("/metrics")
 async def metrics() -> dict:
-    """性能指标端点。"""
+    """性能指标端点（JSON 格式）。"""
     from src.multi_agent_system.core.metrics import metrics_collector
     return metrics_collector.get_stats()
+
+
+@app.get("/prometheus")
+async def prometheus_metrics():
+    """Prometheus 指标抓取端点（标准 exposition 格式）。"""
+    from starlette.responses import Response
+    from src.multi_agent_system.core.metrics import generate_latest, CONTENT_TYPE_LATEST, metrics_collector
+
+    metrics_collector.update_uptime()
+    return Response(
+        content=generate_latest(),
+        media_type=CONTENT_TYPE_LATEST,
+    )

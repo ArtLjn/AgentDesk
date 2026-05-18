@@ -1,26 +1,17 @@
 """工单分类 Agent：分析工单内容，输出分类、优先级和路由建议。"""
 
 import json
-import re
 
 from loguru import logger
 from openai import APIConnectionError, APIError, AuthenticationError, RateLimitError
 
 from src.multi_agent_system.config import Settings
-from src.multi_agent_system.core import CachedLLMClient, FallbackRegistry, fallback_registry, with_retry
+from src.multi_agent_system.core import CachedLLMClient, FallbackRegistry, fallback_registry, track_agent_execution, with_retry
 from src.multi_agent_system.core.exceptions import NonRetryableError, RetryableError
+from src.multi_agent_system.core.json_parser import parse_json_response
 from src.multi_agent_system.models.ticket import TicketCategory, TicketPriority
 
 __all__ = ["ClassifierAgent"]
-
-
-def _parse_json_response(raw: str) -> dict:
-    """从 LLM 响应中提取 JSON，兼容 markdown 代码块包裹。"""
-    # 尝试提取 ```json ... ``` 或 ``` ... ``` 中的内容
-    match = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", raw, re.DOTALL)
-    if match:
-        return json.loads(match.group(1).strip())
-    return json.loads(raw)
 
 # 分类提示词
 _CLASSIFIER_SYSTEM_PROMPT = """\
@@ -38,8 +29,9 @@ _CLASSIFIER_SYSTEM_PROMPT = """\
 - P2: 一般功能问题、普通计费问题
 - P3: 咨询类、轻微问题
 
+注意：category 只能选一个，不要组合多个分类。
 请严格按照以下 JSON 格式输出，不要添加任何额外内容：
-{"category": "technical/billing/complaint/inquiry", "priority": "P0/P1/P2/P3", "reason": "分类和优先级判断的简要理由"}\
+{"category": "technical 或 billing 或 complaint 或 inquiry（只选一个）", "priority": "P0 或 P1 或 P2 或 P3（只选一个）", "reason": "分类和优先级判断的简要理由"}\
 """
 
 # 关键词降级规则（与 graph.py 中的占位逻辑一致）
@@ -99,6 +91,7 @@ class ClassifierAgent:
             )
         return self._client
 
+    @track_agent_execution("classifier")
     async def classify(self, content: str) -> dict:
         """分类工单，返回分类、优先级和理由。
 
@@ -155,7 +148,7 @@ class ClassifierAgent:
         logger.info(f"[Classifier] LLM 响应: {raw}")
 
         try:
-            result = _parse_json_response(raw)
+            result = parse_json_response(raw)
         except json.JSONDecodeError as e:
             raise NonRetryableError(f"LLM 返回非法 JSON: {e}", cause=e)
 

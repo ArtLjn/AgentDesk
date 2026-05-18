@@ -6,6 +6,7 @@
 from src.multi_agent_system.core.cache import LLMCache, llm_cache, reset_cache
 from src.multi_agent_system.core.cached_client import CachedLLMClient
 from src.multi_agent_system.core.concurrent import concurrent_execute, run_with_semaphore
+from src.multi_agent_system.core.json_parser import parse_json_response
 from src.multi_agent_system.core.model_router import (
     ModelRouter,
     get_model_router,
@@ -24,6 +25,7 @@ from src.multi_agent_system.core.logging import (
     structured_logger,
     trace_id_var,
 )
+from src.multi_agent_system.core.agent_metrics import track_agent_execution
 from src.multi_agent_system.core.metrics import MetricsCollector, metrics_collector
 from src.multi_agent_system.core.retry import with_retry
 
@@ -43,6 +45,7 @@ __all__ = [
     "llm_cache",
     "reset_cache",
     "CachedLLMClient",
+    "parse_json_response",
     "ModelRouter",
     "get_model_router",
     "reset_model_router",
@@ -50,4 +53,5 @@ __all__ = [
     "run_with_semaphore",
     "MetricsCollector",
     "metrics_collector",
+    "track_agent_execution",
 ]

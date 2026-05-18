@@ -1,29 +1,21 @@
 """工单处理 Agent：检索知识库并生成解决方案。"""
 
 import json
-import re
 from typing import TYPE_CHECKING
 
 from loguru import logger
 from openai import APIConnectionError, APIError, AuthenticationError, RateLimitError
 
 from src.multi_agent_system.config import Settings
-from src.multi_agent_system.core import CachedLLMClient, fallback_registry, with_retry
+from src.multi_agent_system.core import CachedLLMClient, fallback_registry, track_agent_execution, with_retry
 from src.multi_agent_system.core.exceptions import NonRetryableError, RetryableError
+from src.multi_agent_system.core.json_parser import parse_json_response
 from src.multi_agent_system.models.ticket import TicketCategory
 
 if TYPE_CHECKING:
     from src.multi_agent_system.tools.knowledge_search import KnowledgeSearchTool
 
 __all__ = ["ProcessorAgent"]
-
-
-def _parse_json_response(raw: str) -> dict:
-    """从 LLM 响应中提取 JSON，兼容 markdown 代码块包裹。"""
-    match = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", raw, re.DOTALL)
-    if match:
-        return json.loads(match.group(1).strip())
-    return json.loads(raw)
 
 # 处理提示词模板
 _PROCESSOR_SYSTEM_PROMPT = """\
@@ -85,6 +77,7 @@ class ProcessorAgent:
             )
         return self._client
 
+    @track_agent_execution("processor")
     async def process(
         self,
         content: str,
@@ -216,7 +209,7 @@ class ProcessorAgent:
         logger.info(f"[Processor] LLM 响应: {raw}")
 
         try:
-            result = _parse_json_response(raw)
+            result = parse_json_response(raw)
         except json.JSONDecodeError as e:
             raise NonRetryableError(f"LLM 返回非法 JSON: {e}", cause=e)
 

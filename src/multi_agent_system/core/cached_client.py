@@ -3,6 +3,7 @@
 自动缓存 chat.completions 调用结果，减少重复 Token 消耗。
 """
 
+import time
 from typing import Any
 
 from loguru import logger
@@ -70,15 +71,37 @@ class CachedLLMClient:
             use_model = self.model
         llm_cache = _get_llm_cache()
 
+        from src.multi_agent_system.core.metrics import metrics_collector
+
         # 缓存未启用或显式禁用缓存，直接调用
         if llm_cache is None or not cache:
             logger.debug(f"[CachedLLMClient] 跳过缓存，直接调用 {use_model}")
-            return await self.client.chat.completions.create(
-                model=use_model,
-                messages=messages,
-                temperature=temperature,
-                **kwargs,
-            )
+            metrics_collector.record_cache_query(hit=False)
+            start = time.time()
+            try:
+                result = await self.client.chat.completions.create(
+                    model=use_model,
+                    messages=messages,
+                    temperature=temperature,
+                    **kwargs,
+                )
+                duration = time.time() - start
+                metrics_collector.record_llm_call(
+                    model=use_model,
+                    task_type=task_type or "unknown",
+                    duration_seconds=duration,
+                )
+                return result
+            except Exception as e:
+                duration = time.time() - start
+                metrics_collector.record_llm_call(
+                    model=use_model,
+                    task_type=task_type or "unknown",
+                    duration_seconds=duration,
+                    is_error=True,
+                    error_type=type(e).__name__,
+                )
+                raise
 
         # 生成缓存键
         cache_key = llm_cache._generate_key(
@@ -92,17 +115,36 @@ class CachedLLMClient:
         cached_result = llm_cache.get(cache_key)
         if cached_result is not None:
             logger.debug(f"[CachedLLMClient] 缓存命中 {use_model}")
+            metrics_collector.record_cache_query(hit=True)
             return cached_result
 
         # 缓存未命中，调用 API
         logger.debug(f"[CachedLLMClient] 缓存未命中，调用 {use_model}")
-        result = await self.client.chat.completions.create(
-            model=use_model,
-            messages=messages,
-            temperature=temperature,
-            **kwargs,
-        )
-
-        # 缓存结果
-        llm_cache.set(cache_key, result)
-        return result
+        metrics_collector.record_cache_query(hit=False)
+        start = time.time()
+        try:
+            result = await self.client.chat.completions.create(
+                model=use_model,
+                messages=messages,
+                temperature=temperature,
+                **kwargs,
+            )
+            duration = time.time() - start
+            metrics_collector.record_llm_call(
+                model=use_model,
+                task_type=task_type or "unknown",
+                duration_seconds=duration,
+            )
+            # 缓存结果
+            llm_cache.set(cache_key, result)
+            return result
+        except Exception as e:
+            duration = time.time() - start
+            metrics_collector.record_llm_call(
+                model=use_model,
+                task_type=task_type or "unknown",
+                duration_seconds=duration,
+                is_error=True,
+                error_type=type(e).__name__,
+            )
+            raise

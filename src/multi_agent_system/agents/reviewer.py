@@ -1,24 +1,16 @@
 """工单审核 Agent：检查处理结果质量，返回 0-1 评分。"""
 
 import json
-import re
 
 from loguru import logger
 from openai import APIConnectionError, APIError, AuthenticationError, RateLimitError
 
 from src.multi_agent_system.config import Settings
-from src.multi_agent_system.core import CachedLLMClient, fallback_registry, with_retry
+from src.multi_agent_system.core import CachedLLMClient, fallback_registry, track_agent_execution, with_retry
 from src.multi_agent_system.core.exceptions import NonRetryableError, RetryableError
+from src.multi_agent_system.core.json_parser import parse_json_response
 
 __all__ = ["ReviewerAgent"]
-
-
-def _parse_json_response(raw: str) -> dict:
-    """从 LLM 响应中提取 JSON，兼容 markdown 代码块包裹。"""
-    match = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", raw, re.DOTALL)
-    if match:
-        return json.loads(match.group(1).strip())
-    return json.loads(raw)
 
 # 审核提示词
 _REVIEWER_SYSTEM_PROMPT = """\
@@ -77,6 +69,7 @@ class ReviewerAgent:
             )
         return self._client
 
+    @track_agent_execution("reviewer")
     async def review(
         self,
         content: str,
@@ -155,7 +148,7 @@ class ReviewerAgent:
         logger.info(f"[Reviewer] LLM 响应: {raw}")
 
         try:
-            result = _parse_json_response(raw)
+            result = parse_json_response(raw)
         except json.JSONDecodeError as e:
             raise NonRetryableError(f"LLM 返回非法 JSON: {e}", cause=e)
 

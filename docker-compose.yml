@@ -20,9 +20,6 @@ services:
     env_file:
       - .env
     environment:
-      - LLM_BASE_URL=http://172.16.58.68:11434
-      - LLM_API_KEY=ollama
-      - EMBEDDING_BASE_URL=http://172.16.58.68:11434
       - QDRANT_URL=http://qdrant:6333
       - CACHE_ENABLED=true
       - CACHE_MAX_SIZE=512
