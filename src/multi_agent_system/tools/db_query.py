@@ -1,103 +1,90 @@
-"""模拟数据库查询工具，基于内存 dict 存储工单和用户数据。"""
+"""数据库查询工具，基于 SQLite 持久化存储工单和用户数据。"""
 
 from datetime import datetime
 from typing import Any
 
 from loguru import logger
 
+from src.multi_agent_system.core.database import DatabaseManager, get_db_manager
+
 __all__ = ["DBQueryTool"]
 
 
 class DBQueryTool:
-    """模拟数据库查询工具。
+    """SQLite 数据库查询工具。
 
-    使用内存 dict 模拟数据库表，提供工单 CRUD 和用户查询功能。
-    预置了 3 个示例用户数据。
+    提供工单 CRUD、用户查询和历史记录功能。
+    支持传入外部 DatabaseManager 或自动获取全局实例。
+
+    Args:
+        db_manager: 数据库管理器实例，为 None 时自动获取全局实例
     """
 
-    def __init__(self) -> None:
-        self._tickets: dict[str, dict[str, Any]] = {}
-        self._users: dict[str, dict[str, Any]] = {
-            "U001": {"name": "张三", "vip": True, "ticket_count": 5},
-            "U002": {"name": "李四", "vip": False, "ticket_count": 1},
-            "U003": {"name": "王五", "vip": True, "ticket_count": 12},
-        }
+    def __init__(self, db_manager: DatabaseManager | None = None) -> None:
+        self._db = db_manager
 
-    def save_ticket(self, ticket_data: dict[str, Any]) -> None:
-        """保存工单到内存数据库。
+    async def _get_db(self) -> DatabaseManager:
+        if self._db is not None:
+            return self._db
+        return await get_db_manager()
 
-        如果 ticket_data 中包含已存在的 ticket_id，则更新已有记录。
+    async def save_ticket(self, ticket_data: dict[str, Any]) -> None:
+        db = await self._get_db()
+        await db.save_ticket(ticket_data)
+        logger.debug(f"已保存工单: {ticket_data.get('ticket_id')}")
 
-        Args:
-            ticket_data: 工单数据字典，需包含 "ticket_id" 字段
-        """
-        ticket_id = ticket_data.get("ticket_id")
-        if not ticket_id:
-            logger.warning("保存工单失败：缺少 ticket_id")
+    async def get_ticket(self, ticket_id: str) -> dict[str, Any] | None:
+        db = await self._get_db()
+        return await db.get_ticket(ticket_id)
+
+    async def get_user(self, user_id: str) -> dict[str, Any] | None:
+        db = await self._get_db()
+        return await db.get_user(user_id)
+
+    async def get_ticket_history(self, user_id: str, limit: int = 10) -> list[dict[str, Any]]:
+        db = await self._get_db()
+        return await db.get_user_tickets(user_id, limit)
+
+    async def get_similar_tickets(self, category: str, limit: int = 5) -> list[dict[str, Any]]:
+        db = await self._get_db()
+        return await db.list_tickets(category=category, limit=limit)
+
+    async def list_tickets(
+        self,
+        status: str | None = None,
+        category: str | None = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        db = await self._get_db()
+        return await db.list_tickets(status=status, category=category, limit=limit, offset=offset)
+
+    async def ensure_user(self, user_id: str, name: str = "") -> dict[str, Any]:
+        db = await self._get_db()
+        user = await db.get_user(user_id)
+        if user is None:
+            user = {
+                "user_id": user_id,
+                "name": name,
+                "vip_level": 0,
+                "total_tickets": 0,
+            }
+            await db.save_user(user)
+        return user
+
+    async def update_user_stats(self, user_id: str, satisfaction: bool | None = None) -> None:
+        db = await self._get_db()
+        user = await db.get_user(user_id)
+        if user is None:
             return
 
-        # 如果是新工单，自动添加创建时间
-        if ticket_id not in self._tickets:
-            ticket_data.setdefault("created_at", datetime.now().isoformat())
+        total = user.get("total_tickets", 0) + 1
+        user["total_tickets"] = total
+        user["last_contact"] = datetime.now().isoformat()
 
-        self._tickets[ticket_id] = ticket_data
-        logger.debug(f"已保存工单: {ticket_id}")
+        if satisfaction is not None:
+            current_avg = user.get("avg_satisfaction", 0.0) or 0.0
+            # Simple rolling average
+            user["avg_satisfaction"] = (current_avg * (total - 1) + (1.0 if satisfaction else 0.0)) / total
 
-    def get_ticket(self, ticket_id: str) -> dict[str, Any] | None:
-        """根据 ID 获取单个工单。
-
-        Args:
-            ticket_id: 工单 ID
-
-        Returns:
-            工单数据字典，不存在时返回 None
-        """
-        return self._tickets.get(ticket_id)
-
-    def get_user(self, user_id: str) -> dict[str, Any] | None:
-        """根据 ID 获取用户信息。
-
-        Args:
-            user_id: 用户 ID
-
-        Returns:
-            用户数据字典，不存在时返回 None
-        """
-        return self._users.get(user_id)
-
-    def get_ticket_history(self, user_id: str, limit: int = 10) -> list[dict[str, Any]]:
-        """获取指定用户的工单历史记录。
-
-        按创建时间倒序排列，最多返回 limit 条记录。
-
-        Args:
-            user_id: 用户 ID
-            limit: 最大返回条数，默认 10
-
-        Returns:
-            该用户的工单列表，按时间倒序
-        """
-        user_tickets = [
-            t for t in self._tickets.values() if t.get("user_id") == user_id
-        ]
-        # 按创建时间倒序排列
-        user_tickets.sort(key=lambda t: t.get("created_at", ""), reverse=True)
-        return user_tickets[:limit]
-
-    def get_similar_tickets(
-        self, category: str, limit: int = 5
-    ) -> list[dict[str, Any]]:
-        """获取同分类的工单列表。
-
-        按创建时间倒序排列，最多返回 limit 条记录。
-
-        Args:
-            category: 工单分类
-            limit: 最大返回条数，默认 5
-
-        Returns:
-            同分类工单列表
-        """
-        similar = [t for t in self._tickets.values() if t.get("category") == category]
-        similar.sort(key=lambda t: t.get("created_at", ""), reverse=True)
-        return similar[:limit]
+        await db.save_user(user)

@@ -34,7 +34,7 @@ async def lifespan(app: FastAPI):
     # 初始化基础工具
     db_tool = DBQueryTool()
     notification_tool = NotificationTool()
-    analytics_tool = AnalyticsTool(db_tool)
+    analytics_tool = AnalyticsTool()
 
     # 尝试初始化知识库工具（Qdrant 可用时才初始化）
     knowledge_tool: KnowledgeSearchTool | None = None

@@ -12,6 +12,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from src.multi_agent_system.api.routes import router
+from src.multi_agent_system.core.database import DatabaseManager
 from src.multi_agent_system.tools.analytics import AnalyticsTool
 from src.multi_agent_system.tools.db_query import DBQueryTool
 
@@ -22,9 +23,13 @@ def app():
     app = FastAPI()
     app.include_router(router, prefix="/api")
 
-    # 初始化内存数据库
-    db_tool = DBQueryTool()
-    analytics_tool = AnalyticsTool(db_tool)
+    # 初始化工具（使用内存 SQLite 数据库，每个 fixture 独立）
+    db_manager = DatabaseManager(db_path=":memory:")
+    import asyncio
+    asyncio.run(db_manager.initialize())
+
+    db_tool = DBQueryTool(db_manager=db_manager)
+    analytics_tool = AnalyticsTool(db_manager=db_manager)
 
     # mock workflow（避免真正调用 LLM）
     mock_workflow = AsyncMock()
@@ -81,18 +86,7 @@ class TestTicketAPI:
         )
         ticket_id = create_resp.json()["ticket_id"]
 
-        # 手动补充工单数据（因为 workflow 是 mock 的，不会真正执行）
-        client.app.state.db_tool.save_ticket({
-            "ticket_id": ticket_id,
-            "content": "查询测试",
-            "category": "inquiry",
-            "priority": "P3",
-            "status": "completed",
-            "review_score": 0.85,
-            "retry_count": 0,
-            "created_at": datetime.now().isoformat(),
-        })
-
+        # 通过 API 查询
         response = client.get(f"/api/tickets/{ticket_id}")
 
         assert response.status_code == 200
@@ -109,20 +103,8 @@ class TestTicketAPI:
     def test_list_tickets(self, client):
         """GET /api/tickets 返回工单列表。"""
         # 创建两个工单
-        client.app.state.db_tool.save_ticket({
-            "ticket_id": "T001",
-            "content": "工单1",
-            "status": "completed",
-            "category": "technical",
-            "created_at": datetime.now().isoformat(),
-        })
-        client.app.state.db_tool.save_ticket({
-            "ticket_id": "T002",
-            "content": "工单2",
-            "status": "processing",
-            "category": "billing",
-            "created_at": datetime.now().isoformat(),
-        })
+        client.post("/api/tickets", json={"content": "工单1"})
+        client.post("/api/tickets", json={"content": "工单2"})
 
         response = client.get("/api/tickets")
 
@@ -132,20 +114,20 @@ class TestTicketAPI:
 
     def test_list_tickets_with_filter(self, client):
         """GET /api/tickets?status=completed 按状态过滤。"""
-        client.app.state.db_tool.save_ticket({
-            "ticket_id": "T010",
+        # 创建一个工单并通过 workflow 模拟完成
+        create_resp = client.post("/api/tickets", json={"content": "已完成工单"})
+        ticket_id = create_resp.json()["ticket_id"]
+
+        # 直接修改数据库中的状态为 completed
+        import asyncio
+        db_tool = client.app.state.db_tool
+        asyncio.run(db_tool.save_ticket({
+            "ticket_id": ticket_id,
             "content": "已完成工单",
             "status": "completed",
             "category": "technical",
             "created_at": datetime.now().isoformat(),
-        })
-        client.app.state.db_tool.save_ticket({
-            "ticket_id": "T011",
-            "content": "处理中工单",
-            "status": "processing",
-            "category": "billing",
-            "created_at": datetime.now().isoformat(),
-        })
+        }))
 
         response = client.get("/api/tickets?status=completed")
 
@@ -155,20 +137,22 @@ class TestTicketAPI:
 
     def test_list_tickets_with_category_filter(self, client):
         """GET /api/tickets?category=technical 按分类过滤。"""
-        client.app.state.db_tool.save_ticket({
+        import asyncio
+        db_tool = client.app.state.db_tool
+        asyncio.run(db_tool.save_ticket({
             "ticket_id": "T020",
             "content": "技术工单",
             "status": "completed",
             "category": "technical",
             "created_at": datetime.now().isoformat(),
-        })
-        client.app.state.db_tool.save_ticket({
+        }))
+        asyncio.run(db_tool.save_ticket({
             "ticket_id": "T021",
             "content": "账务工单",
             "status": "completed",
             "category": "billing",
             "created_at": datetime.now().isoformat(),
-        })
+        }))
 
         response = client.get("/api/tickets?category=technical")
 
@@ -220,8 +204,9 @@ class TestAnalyticsAPI:
 
     def test_analytics(self, client):
         """GET /api/analytics 返回统计数据。"""
-        # 预置一些工单数据
-        client.app.state.db_tool.save_ticket({
+        import asyncio
+        db_tool = client.app.state.db_tool
+        asyncio.run(db_tool.save_ticket({
             "ticket_id": "A001",
             "content": "技术问题",
             "category": "technical",
@@ -230,7 +215,7 @@ class TestAnalyticsAPI:
             "review_score": 0.9,
             "retry_count": 0,
             "created_at": datetime.now().isoformat(),
-        })
+        }))
 
         response = client.get("/api/analytics")
 

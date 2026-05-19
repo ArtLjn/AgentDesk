@@ -39,7 +39,7 @@ async def create_ticket(body: TicketCreate, request: Request) -> dict:
     state = create_initial_state(content=body.content)
     ticket_id = state["ticket_id"]
 
-    # 保存初始状态到内存数据库
+    # 保存初始状态到数据库
     db_tool = request.app.state.db_tool
     ticket_data = {
         "ticket_id": ticket_id,
@@ -48,7 +48,7 @@ async def create_ticket(body: TicketCreate, request: Request) -> dict:
         "status": state["status"],
         "created_at": datetime.now().isoformat(),
     }
-    db_tool.save_ticket(ticket_data)
+    await db_tool.save_ticket(ticket_data)
 
     # 后台异步执行工作流
     workflow = request.app.state.workflow
@@ -85,7 +85,7 @@ async def create_batch_tickets(body: BatchTicketCreate, request: Request) -> dic
             "status": state["status"],
             "created_at": datetime.now().isoformat(),
         }
-        db_tool.save_ticket(ticket_data)
+        await db_tool.save_ticket(ticket_data)
 
         # 后台异步执行工作流
         workflow = request.app.state.workflow
@@ -112,7 +112,7 @@ async def create_batch_tickets(body: BatchTicketCreate, request: Request) -> dic
 async def get_ticket(ticket_id: str, request: Request) -> TicketResponse:
     """根据 ticket_id 查询工单详情。"""
     db_tool = request.app.state.db_tool
-    ticket = db_tool.get_ticket(ticket_id)
+    ticket = await db_tool.get_ticket(ticket_id)
 
     if ticket is None:
         raise HTTPException(status_code=404, detail=f"工单 {ticket_id} 不存在")
@@ -141,20 +141,9 @@ async def list_tickets(
 ) -> list[TicketResponse]:
     """工单列表查询，支持状态和分类过滤以及分页。"""
     db_tool = request.app.state.db_tool
-    # 直接访问内部存储，因为 DBQueryTool 没有列表查询方法
-    tickets: list[dict[str, Any]] = list(db_tool._tickets.values())
-
-    # 按条件过滤
-    if status is not None:
-        tickets = [t for t in tickets if t.get("status") == status]
-    if category is not None:
-        tickets = [t for t in tickets if t.get("category") == category]
-
-    # 按创建时间倒序排列
-    tickets.sort(key=lambda t: t.get("created_at", ""), reverse=True)
-
-    # 分页
-    paginated = tickets[offset : offset + limit]
+    tickets: list[dict[str, Any]] = await db_tool.list_tickets(
+        status=status, category=category, limit=limit, offset=offset
+    )
 
     return [
         TicketResponse(
@@ -169,7 +158,7 @@ async def list_tickets(
             error=t.get("error"),
             created_at=t.get("created_at", datetime.now()),
         )
-        for t in paginated
+        for t in tickets
     ]
 
 
@@ -238,10 +227,10 @@ async def get_analytics(request: Request) -> dict:
     analytics_tool = request.app.state.analytics_tool
 
     return {
-        "category_distribution": analytics_tool.get_category_distribution(),
-        "priority_distribution": analytics_tool.get_priority_distribution(),
-        "resolution_stats": analytics_tool.get_resolution_stats(),
-        "daily_stats": analytics_tool.get_daily_stats(),
+        "category_distribution": await analytics_tool.get_category_distribution(),
+        "priority_distribution": await analytics_tool.get_priority_distribution(),
+        "resolution_stats": await analytics_tool.get_resolution_stats(),
+        "daily_stats": await analytics_tool.get_daily_stats(),
     }
 
 
@@ -321,7 +310,7 @@ async def _run_workflow(app: Any, ticket_id: str, state: dict) -> None:
                 current_state.update(node_output)
 
                 # 合并已有数据（保留 user_id、created_at 等字段）
-                existing = db_tool.get_ticket(ticket_id) or {}
+                existing = await db_tool.get_ticket(ticket_id) or {}
                 db_data = {
                     **existing,
                     "ticket_id": ticket_id,
@@ -334,7 +323,7 @@ async def _run_workflow(app: Any, ticket_id: str, state: dict) -> None:
                     "status": current_state.get("status", current_state.get("status", "processing")),
                     "error": current_state.get("error"),
                 }
-                db_tool.save_ticket(db_data)
+                await db_tool.save_ticket(db_data)
 
                 status = db_data.get("status", "processing")
                 label = _NODE_LABELS.get(node_name, node_name)
@@ -357,8 +346,8 @@ async def _run_workflow(app: Any, ticket_id: str, state: dict) -> None:
     except Exception as e:
         logger.error(f"工单处理异常: {ticket_id}, 错误: {e}")
 
-        existing = db_tool.get_ticket(ticket_id) or {}
-        db_tool.save_ticket({
+        existing = await db_tool.get_ticket(ticket_id) or {}
+        await db_tool.save_ticket({
             **existing,
             "ticket_id": ticket_id,
             "status": "failed",
