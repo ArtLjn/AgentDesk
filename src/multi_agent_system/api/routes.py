@@ -1,6 +1,7 @@
 """API 路由模块，提供工单 CRUD、知识库上传、统计查询和 WebSocket 实时推送。"""
 
 import asyncio
+import json
 from datetime import datetime
 from functools import partial
 from typing import Any
@@ -260,6 +261,85 @@ async def get_analytics(request: Request) -> dict:
     }
 
 
+@router.get("/tickets/{ticket_id}/trace")
+async def get_ticket_trace(ticket_id: str, request: Request) -> dict:
+    """获取工单的完整执行 trace。"""
+    db_manager = request.app.state.db_manager
+    trace = await db_manager.get_trace_by_ticket(ticket_id)
+    if trace is None:
+        from fastapi.responses import JSONResponse
+        return JSONResponse(status_code=404, content={"detail": "Trace not found"})
+
+    # 获取所有 span 并构建树
+    spans = await db_manager.get_spans_by_trace(trace["trace_id"])
+    span_tree = _build_span_tree(spans)
+
+    return {
+        "trace_id": trace["trace_id"],
+        "ticket_id": trace["ticket_id"],
+        "status": trace["status"],
+        "duration": trace.get("duration"),
+        "total_tokens": trace.get("total_tokens", 0),
+        "total_tool_calls": trace.get("total_tool_calls", 0),
+        "node_count": trace.get("node_count", 0),
+        "start_time": trace.get("start_time"),
+        "end_time": trace.get("end_time"),
+        "spans": span_tree,
+    }
+
+
+@router.get("/traces")
+async def list_traces(
+    request: Request,
+    status: str | None = None,
+    limit: int = 20,
+    offset: int = 0,
+) -> dict:
+    """查询 trace 列表。"""
+    limit = min(limit, 100)
+    db_manager = request.app.state.db_manager
+    traces = await db_manager.list_traces(status=status, limit=limit, offset=offset)
+    return {"traces": traces, "count": len(traces)}
+
+
+@router.get("/traces/{trace_id}/stats")
+async def get_trace_stats(trace_id: str, request: Request) -> dict:
+    """获取 trace 耗时分析。"""
+    db_manager = request.app.state.db_manager
+    stats = await db_manager.get_trace_stats(trace_id)
+    if stats is None:
+        from fastapi.responses import JSONResponse
+        return JSONResponse(status_code=404, content={"detail": "Trace not found"})
+    return stats
+
+
+def _build_span_tree(spans: list[dict]) -> list[dict]:
+    """将扁平 span 列表构建为嵌套树结构。"""
+    span_map: dict[str, dict] = {}
+    roots: list[dict] = []
+
+    for span in spans:
+        # 解析 JSON 字段
+        for field in ("input_data", "output_data", "metadata"):
+            val = span.get(field)
+            if isinstance(val, str):
+                try:
+                    span[field] = json.loads(val)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+        span["children"] = []
+        span_map[span["span_id"]] = span
+
+    for span in spans:
+        parent_id = span.get("parent_span_id")
+        if parent_id and parent_id in span_map:
+            span_map[parent_id]["children"].append(span)
+        else:
+            roots.append(span)
+
+    return roots
+
+
 # ============================================================
 # WebSocket 实时推送
 # ============================================================
@@ -355,18 +435,38 @@ async def _run_workflow(app: Any, ticket_id: str, state: dict) -> None:
                 label = _NODE_LABELS.get(node_name, node_name)
                 logger.info(f"工单 {ticket_id} 节点 {node_name} 完成，状态: {status}")
 
+                # 构建推送数据
+                span_data = {
+                    "category": db_data.get("category"),
+                    "priority": db_data.get("priority"),
+                    "review_score": db_data.get("review_score"),
+                    "retry_count": db_data.get("retry_count", 0),
+                }
+
+                # 获取最近完成的 node span
+                if hasattr(app.state, "trace_manager") and app.state.trace_manager:
+                    db_mgr = app.state.db_manager
+                    trace = await db_mgr.get_trace_by_ticket(ticket_id)
+                    if trace:
+                        recent_spans = await db_mgr.get_spans_by_trace(trace["trace_id"])
+                        node_spans = [s for s in recent_spans if s["span_type"] == "node" and s.get("duration")]
+                        if node_spans:
+                            last_span = node_spans[-1]
+                            span_data["span"] = {
+                                "span_id": last_span["span_id"],
+                                "span_type": last_span["span_type"],
+                                "name": last_span["name"],
+                                "duration": last_span["duration"],
+                                "status": last_span["status"],
+                            }
+
                 # 推送节点完成事件
                 await _broadcast_ticket_update(
                     ticket_id=ticket_id,
                     status=status,
                     message=f"{label} 完成",
                     node=node_name,
-                    data={
-                        "category": db_data.get("category"),
-                        "priority": db_data.get("priority"),
-                        "review_score": db_data.get("review_score"),
-                        "retry_count": db_data.get("retry_count", 0),
-                    },
+                    data=span_data,
                 )
 
     except Exception as e:
