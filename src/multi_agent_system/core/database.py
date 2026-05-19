@@ -62,6 +62,40 @@ CREATE INDEX IF NOT EXISTS idx_tickets_user ON tickets(user_id);
 CREATE INDEX IF NOT EXISTS idx_tickets_status ON tickets(status);
 CREATE INDEX IF NOT EXISTS idx_tickets_category ON tickets(category);
 CREATE INDEX IF NOT EXISTS idx_checkpoints_expires ON checkpoints(expires_at);
+
+CREATE TABLE IF NOT EXISTS traces (
+    trace_id TEXT PRIMARY KEY,
+    ticket_id TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'running',
+    start_time REAL NOT NULL,
+    end_time REAL,
+    duration REAL,
+    total_tokens INTEGER DEFAULT 0,
+    total_tool_calls INTEGER DEFAULT 0,
+    node_count INTEGER DEFAULT 0,
+    error TEXT
+);
+
+CREATE TABLE IF NOT EXISTS spans (
+    span_id TEXT PRIMARY KEY,
+    trace_id TEXT NOT NULL,
+    parent_span_id TEXT,
+    span_type TEXT NOT NULL,
+    name TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'ok',
+    input_data TEXT,
+    output_data TEXT,
+    start_time REAL NOT NULL,
+    end_time REAL,
+    duration REAL,
+    metadata TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_spans_trace ON spans(trace_id);
+CREATE INDEX IF NOT EXISTS idx_spans_parent ON spans(parent_span_id);
+CREATE INDEX IF NOT EXISTS idx_spans_type ON spans(span_type);
+CREATE INDEX IF NOT EXISTS idx_traces_ticket ON traces(ticket_id);
+CREATE INDEX IF NOT EXISTS idx_traces_status ON traces(status);
 """
 
 
@@ -291,6 +325,135 @@ class DatabaseManager:
                 ),
             )
             await conn.commit()
+
+    # Trace CRUD
+    # ============================================================
+
+    async def save_trace(self, trace_data: dict[str, Any]) -> None:
+        """保存或更新 trace 记录。"""
+        cols = [
+            "trace_id", "ticket_id", "status", "start_time",
+            "end_time", "duration", "total_tokens", "total_tool_calls",
+            "node_count", "error",
+        ]
+        placeholders = ", ".join(["?"] * len(cols))
+        col_str = ", ".join(cols)
+        values = [trace_data.get(c) for c in cols]
+        async with self.connection() as conn:
+            await conn.execute(
+                f"INSERT OR REPLACE INTO traces ({col_str}) VALUES ({placeholders})",
+                values,
+            )
+            await conn.commit()
+
+    async def get_trace_by_ticket(self, ticket_id: str) -> dict[str, Any] | None:
+        """按 ticket_id 查询 trace。"""
+        async with self.connection() as conn:
+            cursor = await conn.execute(
+                "SELECT * FROM traces WHERE ticket_id = ? ORDER BY start_time DESC LIMIT 1",
+                (ticket_id,),
+            )
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
+    async def list_traces(
+        self,
+        status: str | None = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """查询 trace 列表，按 start_time DESC 排序。"""
+        query = "SELECT * FROM traces"
+        params: list[Any] = []
+        if status:
+            query += " WHERE status = ?"
+            params.append(status)
+        query += " ORDER BY start_time DESC LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+        async with self.connection() as conn:
+            cursor = await conn.execute(query, params)
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    async def get_trace_stats(self, trace_id: str) -> dict[str, Any] | None:
+        """获取 trace 的耗时统计。"""
+        trace = None
+        async with self.connection() as conn:
+            cursor = await conn.execute(
+                "SELECT * FROM traces WHERE trace_id = ?",
+                (trace_id,),
+            )
+            row = await cursor.fetchone()
+            if not row:
+                return None
+            trace = dict(row)
+
+            # 按 span_type 聚合
+            cursor = await conn.execute(
+                "SELECT span_type, COUNT(*) as count, "
+                "AVG(duration) as avg_duration, MAX(duration) as max_duration "
+                "FROM spans WHERE trace_id = ? AND duration IS NOT NULL "
+                "GROUP BY span_type",
+                (trace_id,),
+            )
+            by_type = {}
+            for r in await cursor.fetchall():
+                d = dict(r)
+                by_type[d["span_type"]] = {
+                    "count": d["count"],
+                    "avg_duration": round(d["avg_duration"], 4),
+                    "max_duration": round(d["max_duration"], 4),
+                }
+            trace["by_type"] = by_type
+
+            # 最慢的 5 个 span
+            cursor = await conn.execute(
+                "SELECT name, span_type, duration FROM spans "
+                "WHERE trace_id = ? AND duration IS NOT NULL "
+                "ORDER BY duration DESC LIMIT 5",
+                (trace_id,),
+            )
+            trace["slowest_spans"] = [dict(r) for r in await cursor.fetchall()]
+
+        return trace
+
+    async def save_span(self, span_data: dict[str, Any]) -> None:
+        """保存 span 记录。"""
+        cols = [
+            "span_id", "trace_id", "parent_span_id", "span_type",
+            "name", "status", "input_data", "output_data",
+            "start_time", "end_time", "duration", "metadata",
+        ]
+        placeholders = ", ".join(["?"] * len(cols))
+        col_str = ", ".join(cols)
+        values = [span_data.get(c) for c in cols]
+        async with self.connection() as conn:
+            await conn.execute(
+                f"INSERT OR REPLACE INTO spans ({col_str}) VALUES ({placeholders})",
+                values,
+            )
+            await conn.commit()
+
+    async def update_span(self, span_id: str, updates: dict[str, Any]) -> None:
+        """更新 span 记录的部分字段。"""
+        set_parts = [f"{k} = ?" for k in updates]
+        values = list(updates.values()) + [span_id]
+        async with self.connection() as conn:
+            await conn.execute(
+                f"UPDATE spans SET {', '.join(set_parts)} WHERE span_id = ?",
+                values,
+            )
+            await conn.commit()
+
+    async def get_spans_by_trace(self, trace_id: str) -> list[dict[str, Any]]:
+        """查询 trace 的所有 span，按 start_time 排序。"""
+        async with self.connection() as conn:
+            cursor = await conn.execute(
+                "SELECT * FROM spans WHERE trace_id = ? ORDER BY start_time",
+                (trace_id,),
+            )
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
 
     # Analytics
     async def get_category_distribution(self) -> dict[str, int]:
