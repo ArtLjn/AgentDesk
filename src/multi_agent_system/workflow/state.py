@@ -31,3 +31,10 @@ class TicketState(TypedDict):
     status: str
     messages: list[dict]
     error: str | None
+
+    # Memory fields
+    thought_chain: list[dict]           # ReAct 推理链
+    tool_history: list[dict]            # 工具调用历史
+    user_context: dict                  # 用户画像上下文
+    checkpoint_ref: str | None          # 检查点 ID（避免与 LangGraph 保留字冲突）
+    user_id: str | None                 # 用户 ID

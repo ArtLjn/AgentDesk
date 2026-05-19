@@ -51,6 +51,7 @@ class TicketCreate(BaseModel):
 
     content: str
     user_id: str | None = None
+    customer_id: str | None = None  # backward compat
 
 
 class TicketResponse(BaseModel):

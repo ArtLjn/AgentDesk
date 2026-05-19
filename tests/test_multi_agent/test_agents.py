@@ -145,12 +145,13 @@ class TestProcessorAgent:
 
     @pytest.mark.asyncio
     async def test_process_with_knowledge(self, mock_knowledge_tool):
-        """有知识库检索结果时的正常处理。"""
-        mock_response = _make_mock_response({
-            "result": "根据参考资料，建议执行以下步骤...",
-            "references": ["参考来源1"],
-        })
-        mock_client = _make_mock_client(mock_response)
+        """ReAct 循环中 LLM 直接返回结果。"""
+        mock_client = MagicMock()
+        mock_client.chat_completions_create = AsyncMock(side_effect=[
+            MagicMock(choices=[MagicMock(message=MagicMock(
+                content='Thought: 分析问题\nFinal Answer: 根据参考资料，建议执行以下步骤...'
+            ))])
+        ])
 
         agent = ProcessorAgent(
             model="test-model",
@@ -163,7 +164,6 @@ class TestProcessorAgent:
 
         assert result["result"] is not None
         assert len(result["result"]) > 0
-        mock_knowledge_tool.search.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_process_fallback(self, mock_knowledge_tool):
@@ -208,21 +208,14 @@ class TestProcessorAgent:
         assert result["result"] is not None
 
     def test_build_knowledge_context_empty(self):
-        """无知识库结果时返回空字符串。"""
-        context = ProcessorAgent._build_knowledge_context([])
-        assert context == ""
+        """ReActProcessorAgent 通过上下文管理器处理，无需 _build_knowledge_context。"""
+        # ReAct 模式不再使用 _build_knowledge_context，
+        # 工具结果直接嵌入 ReAct 循环对话
+        assert not hasattr(ProcessorAgent, "_build_knowledge_context")
 
     def test_build_knowledge_context_with_refs(self):
-        """有知识库结果时返回格式化的上下文。"""
-        refs = [
-            {"content": "参考内容1", "score": 0.9},
-            {"content": "参考内容2", "score": 0.7},
-        ]
-        context = ProcessorAgent._build_knowledge_context(refs)
-
-        assert "参考资料" in context
-        assert "参考内容1" in context
-        assert "0.90" in context
+        """ReActProcessorAgent 无需 _build_knowledge_context 方法。"""
+        assert not hasattr(ProcessorAgent, "_build_knowledge_context")
 
 
 # ============================================================
