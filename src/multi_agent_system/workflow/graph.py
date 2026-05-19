@@ -82,12 +82,22 @@ _classifier_agent: "ClassifierAgent | None" = None
 _processor_agent: "ProcessorAgent | None" = None
 _reviewer_agent: "ReviewerAgent | None" = None
 
+# 模块级 MemoryManager 引用（由 lifespan 注入）
+_memory_manager = None
+
 
 async def receive(state: TicketState) -> dict:
-    """初始化工单状态，设置 status 为 received。"""
+    """初始化工单状态，加载用户长期记忆。"""
     with log_context(agent="receive"):
+        # Load user context if user_id present
+        user_context = {}
+        if _memory_manager and state.get("user_id"):
+            user_context = await _memory_manager.load_user_context(state["user_id"])
+            await _memory_manager.ensure_user(state["user_id"])
+
         return {
             "status": "received",
+            "user_context": user_context,
             "messages": state.get("messages", [])
             + [{"role": "system", "content": f"工单 {state['ticket_id']} 已接收"}],
         }

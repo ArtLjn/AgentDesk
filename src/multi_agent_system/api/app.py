@@ -1,5 +1,6 @@
 """FastAPI 应用主模块，管理应用生命周期和路由注册。"""
 
+import asyncio
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -12,7 +13,7 @@ from starlette.requests import Request
 
 from src.multi_agent_system.agents.classifier import ClassifierAgent
 from src.multi_agent_system.agents.coordinator import CoordinatorAgent
-from src.multi_agent_system.agents.processor import ProcessorAgent
+from src.multi_agent_system.agents.processor import ReActProcessorAgent
 from src.multi_agent_system.agents.reviewer import ReviewerAgent
 from src.multi_agent_system.config import Settings
 from src.multi_agent_system.tools.analytics import AnalyticsTool
@@ -26,18 +27,24 @@ __all__ = ["app"]
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """应用生命周期管理：启动时初始化工具、Agent 和工作流，关闭时清理。"""
+    """应用生命周期管理：启动时初始化数据库、Agent 和工作流，关闭时清理。"""
     logger.info("🚀 多Agent工单处理系统启动")
 
     settings = Settings()
 
-    # 初始化基础工具
-    db_tool = DBQueryTool()
-    notification_tool = NotificationTool()
-    analytics_tool = AnalyticsTool()
+    # Initialize database
+    from src.multi_agent_system.core.database import get_db_manager
 
-    # 尝试初始化知识库工具（Qdrant 可用时才初始化）
-    knowledge_tool: KnowledgeSearchTool | None = None
+    db_manager = await get_db_manager()
+    app.state.db_manager = db_manager
+
+    # Initialize base tools
+    db_tool = DBQueryTool(db_manager=db_manager)
+    notification_tool = NotificationTool()
+    analytics_tool = AnalyticsTool(db_manager=db_manager)
+
+    # Try to initialize knowledge base tool
+    knowledge_tool = None
     try:
         knowledge_tool = KnowledgeSearchTool.create_from_settings()
         knowledge_tool.ensure_collection()
@@ -45,16 +52,31 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"知识库工具初始化失败（不影响核心功能）: {e}")
 
-    # 初始化 Agent（知识库工具不可用时传 None，ProcessorAgent 内部会降级）
+    # Initialize memory manager
+    from src.multi_agent_system.core.memory import MemoryManager
+
+    memory_manager = MemoryManager(db_manager=db_manager)
+
+    # Initialize tool registry and register tools
+    from src.multi_agent_system.core.tool_base import ToolRegistry
+
+    tool_registry = ToolRegistry()
+    # Register tools that support ToolBase
+    # (KnowledgeSearchTool and NotificationTool need to be refactored to inherit ToolBase)
+
+    # Initialize Agents
     classifier = ClassifierAgent.create_from_settings()
-    processor = ProcessorAgent.create_from_settings(knowledge_tool=knowledge_tool)
+    processor = ReActProcessorAgent.create_from_settings(
+        tool_registry=tool_registry,
+        knowledge_tool=knowledge_tool,
+    )
     reviewer = ReviewerAgent.create_from_settings()
     coordinator = CoordinatorAgent.create_from_settings(
         notification_tool=notification_tool,
         knowledge_tool=knowledge_tool,
     )
 
-    # 构建工作流
+    # Build workflow
     agents = {
         "classifier": classifier,
         "processor": processor,
@@ -62,27 +84,41 @@ async def lifespan(app: FastAPI):
     }
     workflow = build_ticket_graph(settings=settings, agents=agents)
 
-    # 存到 app.state 供路由使用
+    # Store in app state
     app.state.settings = settings
-    app.state.db_manager = db_tool._db
+    app.state.db_manager = db_manager
     app.state.db_tool = db_tool
     app.state.notification_tool = notification_tool
     app.state.analytics_tool = analytics_tool
     app.state.knowledge_tool = knowledge_tool
+    app.state.memory_manager = memory_manager
+    app.state.tool_registry = tool_registry
     app.state.classifier = classifier
     app.state.processor = processor
     app.state.reviewer = reviewer
     app.state.coordinator = coordinator
     app.state.workflow = workflow
 
+    # Restore unfinished checkpoints
+    checkpoints = await memory_manager.list_active_checkpoints()
+    if checkpoints:
+        logger.info(f"恢复 {len(checkpoints)} 个未完成的工单")
+        for cp in checkpoints:
+            ticket_id = cp["ticket_id"]
+            state = cp.get("state", {})
+            # Resume workflow
+            asyncio.create_task(_run_workflow(app, ticket_id, state))
+
     logger.info("应用初始化完成")
 
     yield
 
-    # 关闭时清理
+    # Cleanup
     logger.info("🛑 应用关闭中，清理资源...")
     from src.multi_agent_system.core.cache import reset_cache
+
     reset_cache()
+    await db_manager.close()
     logger.info("✅ 资源清理完成")
 
 

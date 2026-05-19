@@ -34,6 +34,13 @@ class Settings(BaseSettings):
     max_retries: int = 3
     review_threshold: float = 0.7
 
+    # 上下文管理
+    max_messages: int = 20
+    checkpoint_ttl: int = 86400  # 24 hours in seconds
+
+    # ReAct 配置
+    max_react_iterations: int = 10
+
     # 并发配置
     max_concurrency: int = 5
 
