@@ -100,14 +100,9 @@ async def lifespan(app: FastAPI):
     app.state.workflow = workflow
 
     # Restore unfinished checkpoints
-    checkpoints = await memory_manager.list_active_checkpoints()
+    checkpoints = await db_manager.list_active_checkpoints()
     if checkpoints:
-        logger.info(f"恢复 {len(checkpoints)} 个未完成的工单")
-        for cp in checkpoints:
-            ticket_id = cp["ticket_id"]
-            state = cp.get("state", {})
-            # Resume workflow
-            asyncio.create_task(_run_workflow(app, ticket_id, state))
+        logger.info(f"发现 {len(checkpoints)} 个未完成的检查点（恢复功能待实现）")
 
     logger.info("应用初始化完成")
 
