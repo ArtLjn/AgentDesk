@@ -13,6 +13,7 @@ from src.multi_agent_system.core.context_manager import ContextManager
 from src.multi_agent_system.core.exceptions import NonRetryableError, RetryableError
 from src.multi_agent_system.core.json_parser import parse_json_response
 from src.multi_agent_system.core.memory import MemoryManager
+from src.multi_agent_system.core.trace import current_trace_id
 
 if TYPE_CHECKING:
     from src.multi_agent_system.core.tool_base import ToolRegistry
@@ -185,81 +186,92 @@ class ReActProcessorAgent:
         for iteration in range(self._max_iterations):
             logger.info(f"[ReAct] Iteration {iteration + 1}/{self._max_iterations}")
 
-            # Trim context before each call
-            messages = self._context_manager.trim_messages(messages)
+            # 为每轮迭代创建 span（如有活跃 trace）
+            iter_span = self._get_react_iter_span(iteration)
 
-            try:
-                response = await self.client.chat_completions_create(
-                    messages=messages,
-                    temperature=0.3,
-                    task_type=self._task_type,
-                )
-            except AuthenticationError as e:
-                raise NonRetryableError(f"API 认证失败: {e}", cause=e)
-            except (APIError, APIConnectionError, RateLimitError) as e:
-                raise RetryableError(f"API 调用失败: {e}", cause=e)
+            async with iter_span:
+                # Trim context before each call
+                messages = self._context_manager.trim_messages(messages)
 
-            raw = response.choices[0].message.content or ""
-            logger.info(f"[ReAct] LLM response: {raw[:200]}...")
-
-            # Check for Final Answer
-            if "Final Answer:" in raw:
-                answer = raw.split("Final Answer:")[-1].strip()
-
-                # Record in memory
-                if memory:
-                    memory.add_thought(f"Completed in {iteration + 1} iterations", iteration)
-
-                return {
-                    "result": answer,
-                    "references": [],
-                }
-
-            # Try to parse as direct JSON result (backward compat)
-            if raw.strip().startswith("{"):
                 try:
-                    parsed = parse_json_response(raw)
-                    if "result" in parsed:
-                        return {
-                            "result": parsed.get("result", ""),
-                            "references": parsed.get("references", []),
-                        }
-                except json.JSONDecodeError:
-                    pass
+                    response = await self.client.chat_completions_create(
+                        messages=messages,
+                        temperature=0.3,
+                        task_type=self._task_type,
+                    )
+                except AuthenticationError as e:
+                    raise NonRetryableError(f"API 认证失败: {e}", cause=e)
+                except (APIError, APIConnectionError, RateLimitError) as e:
+                    raise RetryableError(f"API 调用失败: {e}", cause=e)
 
-            # Parse Thought and Action
-            thought = self._extract_thought(raw)
-            action = self._extract_action(raw)
+                raw = response.choices[0].message.content or ""
+                logger.info(f"[ReAct] LLM response: {raw[:200]}...")
 
-            if memory:
-                memory.add_thought(thought or f"Iteration {iteration + 1}", iteration)
+                # Check for Final Answer
+                if "Final Answer:" in raw:
+                    answer = raw.split("Final Answer:")[-1].strip()
 
-            if action:
-                tool_name = action.get("tool", "")
-                params = action.get("params", {})
+                    # Record in memory
+                    if memory:
+                        memory.add_thought(f"Completed in {iteration + 1} iterations", iteration)
+
+                    iter_span.set_output({"final_answer": True, "iterations": iteration + 1})
+                    return {
+                        "result": answer,
+                        "references": [],
+                    }
+
+                # Try to parse as direct JSON result (backward compat)
+                if raw.strip().startswith("{"):
+                    try:
+                        parsed = parse_json_response(raw)
+                        if "result" in parsed:
+                            iter_span.set_output({"json_result": True})
+                            return {
+                                "result": parsed.get("result", ""),
+                                "references": parsed.get("references", []),
+                            }
+                    except json.JSONDecodeError:
+                        pass
+
+                # Parse Thought and Action
+                thought = self._extract_thought(raw)
+                action = self._extract_action(raw)
 
                 if memory:
-                    memory.add_action(tool_name, params, iteration)
+                    memory.add_thought(thought or f"Iteration {iteration + 1}", iteration)
 
-                # Execute tool
-                observation = await self._execute_tool(tool_name, params)
+                if action:
+                    tool_name = action.get("tool", "")
+                    params = action.get("params", {})
 
-                if memory:
-                    memory.add_observation(str(observation), iteration)
+                    if memory:
+                        memory.add_action(tool_name, params, iteration)
 
-                # Add to conversation
-                messages.append({"role": "assistant", "content": raw})
-                messages.append({
-                    "role": "user",
-                    "content": f"Observation: {observation}",
-                })
-            else:
-                # No action found, just add response and continue
-                messages.append({"role": "assistant", "content": raw})
-                messages.append({
-                    "role": "user",
-                    "content": "Observation: 未识别到工具调用，请继续思考或直接给出 Final Answer。",
-                })
+                    # 工具调用 span
+                    tool_span = self._get_tool_span(tool_name, params)
+                    async with tool_span:
+                        observation = await self._execute_tool(tool_name, params)
+                        tool_span.set_output({"observation_length": len(str(observation))})
+
+                    if memory:
+                        memory.add_observation(str(observation), iteration)
+
+                    # Add to conversation
+                    messages.append({"role": "assistant", "content": raw})
+                    messages.append({
+                        "role": "user",
+                        "content": f"Observation: {observation}",
+                    })
+                else:
+                    # No action found, just add response and continue
+                    messages.append({"role": "assistant", "content": raw})
+                    messages.append({
+                        "role": "user",
+                        "content": "Observation: 未识别到工具调用，请继续思考或直接给出 Final Answer。",
+                    })
+
+                iter_span.set_metadata({"thought": thought, "has_action": action is not None})
 
         # Max iterations reached
         logger.warning(f"[ReAct] Max iterations ({self._max_iterations}) reached")
@@ -325,6 +337,30 @@ class ReActProcessorAgent:
             except Exception as fb_e:
                 return f"工具执行失败: {e}; 降级也失败: {fb_e}"
 
+    def _get_react_iter_span(self, iteration: int):
+        """获取 ReAct 迭代 span context manager。"""
+        if current_trace_id.get() is None:
+            return _NoOpSpan()
+        from src.multi_agent_system.workflow.graph import _trace_manager
+        if _trace_manager is None:
+            return _NoOpSpan()
+        return _trace_manager.start_span(
+            f"react_iter_{iteration + 1}",
+            "react_iter",
+            input_data={"iteration": iteration + 1},
+        )
+
+    def _get_tool_span(self, tool_name: str, params: dict):
+        """获取工具调用 span context manager。"""
+        from src.multi_agent_system.workflow.graph import _trace_manager
+        if _trace_manager is None:
+            return _NoOpSpan()
+        return _trace_manager.start_span(
+            tool_name,
+            "tool_call",
+            input_data={"tool": tool_name, "params": params},
+        )
+
     @staticmethod
     def _fallback_process(content: str, category: str, priority: str) -> dict:
         """LLM 调用失败时的降级处理方案。
@@ -366,6 +402,28 @@ class ReActProcessorAgent:
             api_key=settings.llm_api_key,
             base_url=settings.llm_base_url,
         )
+
+
+class _NoOpSpan:
+    """无 trace 时的空操作 span。"""
+
+    span_id = ""
+    trace_id = ""
+
+    def set_output(self, data):  # noqa: ANN001, ANN202
+        pass
+
+    def set_metadata(self, data):  # noqa: ANN001, ANN202
+        pass
+
+    def set_status(self, status):  # noqa: ANN001, ANN202
+        pass
+
+    async def __aenter__(self):  # noqa: ANN204
+        return self
+
+    async def __aexit__(self, *args):  # noqa: ANN002, ANN204
+        return False
 
 
 # 模块级降级注册
