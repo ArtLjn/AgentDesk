@@ -11,6 +11,7 @@ from src.multi_agent_system.core.database import DatabaseManager, get_db_manager
 from src.multi_agent_system.core.evaluation import EvaluationCollector
 from src.multi_agent_system.core.json_parser import parse_json_response
 from src.multi_agent_system.core.memory import MemoryManager
+from src.multi_agent_system.core.trace import TraceManager
 from src.multi_agent_system.core.model_router import (
     ModelRouter,
     get_model_router,
@@ -65,6 +66,7 @@ __all__ = [
     "ToolBase",
     "ToolRegistry",
     "MemoryManager",
+    "TraceManager",
     "ContextManager",
     "EvaluationCollector",
 ]

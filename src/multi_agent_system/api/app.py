@@ -57,6 +57,11 @@ async def lifespan(app: FastAPI):
 
     memory_manager = MemoryManager(db_manager=db_manager)
 
+    # Initialize trace manager
+    from src.multi_agent_system.core.trace import TraceManager
+
+    trace_manager = TraceManager(db_manager=db_manager)
+
     # Initialize tool registry and register tools
     from src.multi_agent_system.core.tool_base import ToolRegistry
 
@@ -82,7 +87,7 @@ async def lifespan(app: FastAPI):
         "processor": processor,
         "reviewer": reviewer,
     }
-    workflow = build_ticket_graph(settings=settings, agents=agents)
+    workflow = build_ticket_graph(settings=settings, agents=agents, trace_manager=trace_manager)
 
     # Store in app state
     app.state.settings = settings
@@ -92,6 +97,7 @@ async def lifespan(app: FastAPI):
     app.state.analytics_tool = analytics_tool
     app.state.knowledge_tool = knowledge_tool
     app.state.memory_manager = memory_manager
+    app.state.trace_manager = trace_manager
     app.state.tool_registry = tool_registry
     app.state.classifier = classifier
     app.state.processor = processor
