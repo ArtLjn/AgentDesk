@@ -31,9 +31,7 @@ async def test_database_initializes_tables():
     await manager.initialize()
 
     async with manager.connection() as conn:
-        cursor = await conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'"
-        )
+        cursor = await conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
         tables = {row[0] for row in await cursor.fetchall()}
 
     assert "tickets" in tables
