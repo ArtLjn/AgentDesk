@@ -10,6 +10,7 @@ from loguru import logger
 from openai import AsyncOpenAI
 
 from src.multi_agent_system.config import Settings
+from src.multi_agent_system.core.trace import current_trace_id
 
 __all__ = ["CachedLLMClient"]
 
@@ -77,31 +78,35 @@ class CachedLLMClient:
         if llm_cache is None or not cache:
             logger.debug(f"[CachedLLMClient] 跳过缓存，直接调用 {use_model}")
             metrics_collector.record_cache_query(hit=False)
-            start = time.time()
-            try:
-                result = await self.client.chat.completions.create(
-                    model=use_model,
-                    messages=messages,
-                    temperature=temperature,
-                    **kwargs,
-                )
-                duration = time.time() - start
-                metrics_collector.record_llm_call(
-                    model=use_model,
-                    task_type=task_type or "unknown",
-                    duration_seconds=duration,
-                )
-                return result
-            except Exception as e:
-                duration = time.time() - start
-                metrics_collector.record_llm_call(
-                    model=use_model,
-                    task_type=task_type or "unknown",
-                    duration_seconds=duration,
-                    is_error=True,
-                    error_type=type(e).__name__,
-                )
-                raise
+            trace_span = self._get_llm_span(use_model, task_type)
+            async with trace_span:
+                start = time.time()
+                try:
+                    result = await self.client.chat.completions.create(
+                        model=use_model,
+                        messages=messages,
+                        temperature=temperature,
+                        **kwargs,
+                    )
+                    duration = time.time() - start
+                    metrics_collector.record_llm_call(
+                        model=use_model,
+                        task_type=task_type or "unknown",
+                        duration_seconds=duration,
+                    )
+                    tokens = getattr(result.usage, "total_tokens", 0) if hasattr(result, "usage") and result.usage else 0
+                    trace_span.set_metadata({"model": use_model, "tokens": tokens, "duration": round(duration, 4)})
+                    return result
+                except Exception as e:
+                    duration = time.time() - start
+                    metrics_collector.record_llm_call(
+                        model=use_model,
+                        task_type=task_type or "unknown",
+                        duration_seconds=duration,
+                        is_error=True,
+                        error_type=type(e).__name__,
+                    )
+                    raise
 
         # 生成缓存键
         cache_key = llm_cache._generate_key(
@@ -121,30 +126,70 @@ class CachedLLMClient:
         # 缓存未命中，调用 API
         logger.debug(f"[CachedLLMClient] 缓存未命中，调用 {use_model}")
         metrics_collector.record_cache_query(hit=False)
-        start = time.time()
-        try:
-            result = await self.client.chat.completions.create(
-                model=use_model,
-                messages=messages,
-                temperature=temperature,
-                **kwargs,
-            )
-            duration = time.time() - start
-            metrics_collector.record_llm_call(
-                model=use_model,
-                task_type=task_type or "unknown",
-                duration_seconds=duration,
-            )
-            # 缓存结果
-            llm_cache.set(cache_key, result)
-            return result
-        except Exception as e:
-            duration = time.time() - start
-            metrics_collector.record_llm_call(
-                model=use_model,
-                task_type=task_type or "unknown",
-                duration_seconds=duration,
-                is_error=True,
-                error_type=type(e).__name__,
-            )
-            raise
+        trace_span = self._get_llm_span(use_model, task_type)
+        async with trace_span:
+            start = time.time()
+            try:
+                result = await self.client.chat.completions.create(
+                    model=use_model,
+                    messages=messages,
+                    temperature=temperature,
+                    **kwargs,
+                )
+                duration = time.time() - start
+                metrics_collector.record_llm_call(
+                    model=use_model,
+                    task_type=task_type or "unknown",
+                    duration_seconds=duration,
+                )
+                tokens = getattr(result.usage, "total_tokens", 0) if hasattr(result, "usage") and result.usage else 0
+                trace_span.set_metadata({"model": use_model, "tokens": tokens, "duration": round(duration, 4)})
+                # 缓存结果
+                llm_cache.set(cache_key, result)
+                return result
+            except Exception as e:
+                duration = time.time() - start
+                metrics_collector.record_llm_call(
+                    model=use_model,
+                    task_type=task_type or "unknown",
+                    duration_seconds=duration,
+                    is_error=True,
+                    error_type=type(e).__name__,
+                )
+                raise
+
+    @staticmethod
+    def _get_llm_span(model: str, task_type: str | None):
+        """获取 LLM 调用 span。"""
+        if current_trace_id.get() is None:
+            return _NoOpLLMSpan()
+        from src.multi_agent_system.workflow.graph import _trace_manager
+        if _trace_manager is None:
+            return _NoOpLLMSpan()
+        return _trace_manager.start_span(
+            "chat_completions",
+            "llm_call",
+            input_data={"model": model, "task_type": task_type},
+        )
+
+
+class _NoOpLLMSpan:
+    """无 trace 时的空操作 LLM span。"""
+
+    span_id = ""
+    trace_id = ""
+
+    def set_output(self, data: dict[str, Any]) -> None:
+        pass
+
+    def set_metadata(self, data: dict[str, Any]) -> None:
+        pass
+
+    def set_status(self, status: str) -> None:
+        pass
+
+    async def __aenter__(self) -> "_NoOpLLMSpan":
+        return self
+
+    async def __aexit__(self, *args: Any) -> bool:
+        return False
