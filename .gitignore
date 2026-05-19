@@ -30,3 +30,4 @@ qdrant_storage/
 # Logs
 logs/
 *.log
+.worktrees/
