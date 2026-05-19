@@ -5,7 +5,7 @@
 否则使用占位实现（向后兼容）。
 """
 
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from langgraph.graph import END, START, StateGraph
 
@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from src.multi_agent_system.agents.classifier import ClassifierAgent
     from src.multi_agent_system.agents.processor import ProcessorAgent
     from src.multi_agent_system.agents.reviewer import ReviewerAgent
+    from src.multi_agent_system.core.trace import TraceManager
 
 __all__ = ["build_ticket_graph", "create_initial_state"]
 
@@ -85,22 +86,61 @@ _reviewer_agent: "ReviewerAgent | None" = None
 # 模块级 MemoryManager 引用（由 lifespan 注入）
 _memory_manager = None
 
+# 模块级 TraceManager 引用（由 lifespan 注入）
+_trace_manager = None
+
+
+class _NoOpSpanContext:
+    """无活跃 trace 时的空操作 span。"""
+
+    span_id = ""
+    trace_id = ""
+
+    def set_output(self, data: dict[str, Any]) -> None:
+        pass
+
+    def set_metadata(self, data: dict[str, Any]) -> None:
+        pass
+
+    def set_status(self, status: str) -> None:
+        pass
+
+    async def __aenter__(self) -> "_NoOpSpanContext":
+        return self
+
+    async def __aexit__(self, *args: Any) -> bool:
+        return False
+
+
+def _span(name: str, span_type: str = "node", **kwargs: Any):
+    """获取当前 span context manager，无 TraceManager 时返回 no-op。"""
+    if _trace_manager is not None:
+        return _trace_manager.start_span(name, span_type, **kwargs)
+    return _NoOpSpanContext()
+
 
 async def receive(state: TicketState) -> dict:
     """初始化工单状态，加载用户长期记忆。"""
     with log_context(agent="receive"):
-        # Load user context if user_id present
-        user_context = {}
-        if _memory_manager and state.get("user_id"):
-            user_context = await _memory_manager.load_user_context(state["user_id"])
-            await _memory_manager.ensure_user(state["user_id"])
+        # 启动 trace
+        if _trace_manager is not None:
+            await _trace_manager.start_trace(state["ticket_id"])
 
-        return {
-            "status": "received",
-            "user_context": user_context,
-            "messages": state.get("messages", [])
-            + [{"role": "system", "content": f"工单 {state['ticket_id']} 已接收"}],
-        }
+        async with _span("receive", input_data={"content": state["content"]}) as span:
+            # Load user context if user_id present
+            user_context = {}
+            if _memory_manager and state.get("user_id"):
+                user_context = await _memory_manager.load_user_context(state["user_id"])
+                await _memory_manager.ensure_user(state["user_id"])
+
+            result = {
+                "status": "received",
+                "user_context": user_context,
+                "messages": state.get("messages", [])
+                + [{"role": "system", "content": f"工单 {state['ticket_id']} 已接收"}],
+            }
+            span.set_output({"status": "received"})
+            return result
 
 
 async def classify(state: TicketState) -> dict:
@@ -110,30 +150,16 @@ async def classify(state: TicketState) -> dict:
     此处仅保留 Agent 实例不可用时的占位实现。
     """
     with log_context(agent="classifier"):
-        content = state["content"]
+        async with _span("classify", input_data={"content": state["content"]}) as span:
+            content = state["content"]
 
-        # Agent 可用时，直接调用（重试/降级由装饰器处理）
-        if _classifier_agent is not None:
-            result = await _classifier_agent.classify(content)
-            category = result["category"]
-            priority = result["priority"]
-            reason = result.get("reason", "")
-            return {
-                "category": category,
-                "priority": priority,
-                "status": "classifying",
-                "messages": state["messages"]
-                + [
-                    {
-                        "role": "classifier",
-                        "content": f"分类结果: {category}, 优先级: {priority}, 理由: {reason}",
-                    }
-                ],
-            }
-
-        # 占位分类：关键词匹配
-        for keyword, (category, priority) in _CLASSIFY_RULES.items():
-            if keyword in content:
+            # Agent 可用时，直接调用（重试/降级由装饰器处理）
+            if _classifier_agent is not None:
+                result = await _classifier_agent.classify(content)
+                category = result["category"]
+                priority = result["priority"]
+                reason = result.get("reason", "")
+                span.set_output({"category": category, "priority": priority})
                 return {
                     "category": category,
                     "priority": priority,
@@ -142,24 +168,42 @@ async def classify(state: TicketState) -> dict:
                     + [
                         {
                             "role": "classifier",
-                            "content": f"分类结果: {category}, 优先级: {priority}",
+                            "content": f"分类结果: {category}, 优先级: {priority}, 理由: {reason}",
                         }
                     ],
                 }
 
-        # 默认分类为咨询，优先级 P3
-        return {
-            "category": TicketCategory.INQUIRY.value,
-            "priority": TicketPriority.P3.value,
-            "status": "classifying",
-            "messages": state["messages"]
-            + [
-                {
-                    "role": "classifier",
-                    "content": f"分类结果: {TicketCategory.INQUIRY.value}, 优先级: {TicketPriority.P3.value}（默认）",
-                }
-            ],
-        }
+            # 占位分类：关键词匹配
+            for keyword, (category, priority) in _CLASSIFY_RULES.items():
+                if keyword in content:
+                    span.set_output({"category": category, "priority": priority})
+                    return {
+                        "category": category,
+                        "priority": priority,
+                        "status": "classifying",
+                        "messages": state["messages"]
+                        + [
+                            {
+                                "role": "classifier",
+                                "content": f"分类结果: {category}, 优先级: {priority}",
+                            }
+                        ],
+                    }
+
+            # 默认分类为咨询，优先级 P3
+            span.set_output({"category": TicketCategory.INQUIRY.value, "priority": TicketPriority.P3.value})
+            return {
+                "category": TicketCategory.INQUIRY.value,
+                "priority": TicketPriority.P3.value,
+                "status": "classifying",
+                "messages": state["messages"]
+                + [
+                    {
+                        "role": "classifier",
+                        "content": f"分类结果: {TicketCategory.INQUIRY.value}, 优先级: {TicketPriority.P3.value}（默认）",
+                    }
+                ],
+            }
 
 
 async def route(state: TicketState) -> dict:
@@ -178,36 +222,39 @@ async def process(state: TicketState) -> dict:
     此处仅保留 Agent 实例不可用时的占位实现。
     """
     with log_context(agent="processor"):
-        category = state.get("category", "")
-        priority = state.get("priority", "P3")
-        content = state["content"]
+        async with _span("process", input_data={"category": state.get("category"), "priority": state.get("priority")}) as span:
+            category = state.get("category", "")
+            priority = state.get("priority", "P3")
+            content = state["content"]
 
-        # Agent 可用时，直接调用（重试/降级由装饰器处理）
-        if _processor_agent is not None:
-            result = await _processor_agent.process(content, category, priority)
-            processing_result = result["result"]
+            # Agent 可用时，直接调用（重试/降级由装饰器处理）
+            if _processor_agent is not None:
+                result = await _processor_agent.process(content, category, priority)
+                processing_result = result["result"]
+                span.set_output({"result_length": len(processing_result)})
+                return {
+                    "processing_result": processing_result,
+                    "status": "processing",
+                    "messages": state["messages"]
+                    + [{"role": "processor", "content": processing_result}],
+                }
+
+            # 占位处理：根据分类生成模拟结果
+            result_map = {
+                TicketCategory.TECHNICAL.value: f"已排查技术问题，生成解决方案（优先级: {priority}）",
+                TicketCategory.BILLING.value: f"已核实账单信息，生成处理方案（优先级: {priority}）",
+            }
+            processing_result = result_map.get(
+                category, f"已处理工单（分类: {category}, 优先级: {priority}）"
+            )
+            span.set_output({"result": "placeholder"})
+
             return {
                 "processing_result": processing_result,
                 "status": "processing",
                 "messages": state["messages"]
                 + [{"role": "processor", "content": processing_result}],
             }
-
-        # 占位处理：根据分类生成模拟结果
-        result_map = {
-            TicketCategory.TECHNICAL.value: f"已排查技术问题，生成解决方案（优先级: {priority}）",
-            TicketCategory.BILLING.value: f"已核实账单信息，生成处理方案（优先级: {priority}）",
-        }
-        processing_result = result_map.get(
-            category, f"已处理工单（分类: {category}, 优先级: {priority}）"
-        )
-
-        return {
-            "processing_result": processing_result,
-            "status": "processing",
-            "messages": state["messages"]
-            + [{"role": "processor", "content": processing_result}],
-        }
 
 
 async def review(state: TicketState) -> dict:
@@ -217,101 +264,126 @@ async def review(state: TicketState) -> dict:
     此处仅保留 Agent 实例不可用时的占位实现。
     """
     with log_context(agent="reviewer"):
-        retry_count = state.get("retry_count", 0)
-        content = state["content"]
-        processing_result = state.get("processing_result", "")
-        category = state.get("category", "")
+        async with _span("review", input_data={"retry_count": state.get("retry_count", 0)}) as span:
+            retry_count = state.get("retry_count", 0)
+            content = state["content"]
+            processing_result = state.get("processing_result", "")
+            category = state.get("category", "")
 
-        # Agent 可用时，直接调用（重试/降级由装饰器处理）
-        if _reviewer_agent is not None:
-            result = await _reviewer_agent.review(content, processing_result, category)
-            score = result["score"]
+            # Agent 可用时，直接调用（重试/降级由装饰器处理）
+            if _reviewer_agent is not None:
+                result = await _reviewer_agent.review(content, processing_result, category)
+                score = result["score"]
+                span.set_output({"review_score": score})
+                return {
+                    "review_score": score,
+                    "status": "reviewing",
+                    "messages": state["messages"]
+                    + [
+                        {
+                            "role": "reviewer",
+                            "content": f"审核评分: {score:.2f}, 反馈: {result.get('feedback', '')}",
+                        }
+                    ],
+                }
+
+            # 占位审核：重试次数越多，评分越低
+            base_score = 0.85
+            score = max(0.3, base_score - retry_count * 0.15)
+            span.set_output({"review_score": score})
+
             return {
                 "review_score": score,
                 "status": "reviewing",
                 "messages": state["messages"]
-                + [
-                    {
-                        "role": "reviewer",
-                        "content": f"审核评分: {score:.2f}, 反馈: {result.get('feedback', '')}",
-                    }
-                ],
+                + [{"role": "reviewer", "content": f"审核评分: {score:.2f}"}],
             }
-
-        # 占位审核：重试次数越多，评分越低
-        base_score = 0.85
-        score = max(0.3, base_score - retry_count * 0.15)
-
-        return {
-            "review_score": score,
-            "status": "reviewing",
-            "messages": state["messages"]
-            + [{"role": "reviewer", "content": f"审核评分: {score:.2f}"}],
-        }
 
 
 async def auto_reply(state: TicketState) -> dict:
     """咨询类工单直接生成回复。"""
     with log_context(agent="auto_reply"):
-        reply = f"感谢您的咨询。关于「{state['content'][:50]}」，已为您生成自动回复。"
-        return {
-            "processing_result": reply,
-            "status": "processing",
-            "messages": state["messages"] + [{"role": "auto_reply", "content": reply}],
-        }
+        async with _span("auto_reply", input_data={"category": state.get("category")}) as span:
+            reply = f"感谢您的咨询。关于「{state['content'][:50]}」，已为您生成自动回复。"
+            span.set_output({"reply_length": len(reply)})
+            return {
+                "processing_result": reply,
+                "status": "processing",
+                "messages": state["messages"] + [{"role": "auto_reply", "content": reply}],
+            }
 
 
 async def escalate(state: TicketState) -> dict:
     """升级节点：P0 或投诉类工单标记需要人工处理。"""
     with log_context(agent="escalation"):
-        category = state.get("category", "")
-        priority = state.get("priority", "P3")
+        async with _span("escalate", input_data={"category": state.get("category"), "priority": state.get("priority")}) as span:
+            category = state.get("category", "")
+            priority = state.get("priority", "P3")
 
-        reason = (
-            "P0 紧急工单"
-            if priority == TicketPriority.P0.value
-            else f"投诉类工单（分类: {category}）"
-        )
-        escalation_msg = f"已升级至人工处理，原因: {reason}"
+            reason = (
+                "P0 紧急工单"
+                if priority == TicketPriority.P0.value
+                else f"投诉类工单（分类: {category}）"
+            )
+            escalation_msg = f"已升级至人工处理，原因: {reason}"
+            span.set_output({"reason": reason})
 
-        return {
-            "processing_result": escalation_msg,
-            "status": "processing",
-            "messages": state["messages"]
-            + [{"role": "escalator", "content": escalation_msg}],
-        }
+            return {
+                "processing_result": escalation_msg,
+                "status": "processing",
+                "messages": state["messages"]
+                + [{"role": "escalator", "content": escalation_msg}],
+            }
 
 
 async def notify(state: TicketState) -> dict:
     """发送处理结果通知。"""
     with log_context(agent="notification"):
-        result = state.get("processing_result", "无处理结果")
-        notification = f"通知: 工单 {state['ticket_id']} 处理完成 - {result}"
+        async with _span("notify", input_data={"has_result": bool(state.get("processing_result"))}) as span:
+            result = state.get("processing_result", "无处理结果")
+            notification = f"通知: 工单 {state['ticket_id']} 处理完成 - {result}"
+            span.set_output({"notification_length": len(notification)})
 
-        return {
-            "messages": state["messages"] + [{"role": "notifier", "content": notification}],
-        }
+            return {
+                "messages": state["messages"] + [{"role": "notifier", "content": notification}],
+            }
 
 
 async def complete(state: TicketState) -> dict:
     """归档节点：标记工单状态为已完成。"""
     with log_context(agent="complete"):
-        return {
-            "status": "completed",
-            "messages": state["messages"]
-            + [{"role": "system", "content": f"工单 {state['ticket_id']} 已归档完成"}],
-        }
+        async with _span("complete") as span:
+            if _trace_manager is not None:
+                from src.multi_agent_system.core.trace import current_trace_id
+
+                tid = current_trace_id.get()
+                if tid:
+                    await _trace_manager.finish_trace(tid, "completed")
+            span.set_output({"status": "completed"})
+            return {
+                "status": "completed",
+                "messages": state["messages"]
+                + [{"role": "system", "content": f"工单 {state['ticket_id']} 已归档完成"}],
+            }
 
 
 async def handle_failure(state: TicketState) -> dict:
     """失败处理节点：标记工单状态为失败。"""
     with log_context(agent="failure_handler"):
-        error_msg = f"工单处理失败，已达最大重试次数({_get_settings().max_retries}次)"
-        return {
-            "status": "failed",
-            "error": error_msg,
-            "messages": state["messages"] + [{"role": "system", "content": error_msg}],
-        }
+        async with _span("handle_failure", input_data={"error": state.get("error")}) as span:
+            error_msg = state.get("error", f"工单处理失败，已达最大重试次数({_get_settings().max_retries}次)")
+            if _trace_manager is not None:
+                from src.multi_agent_system.core.trace import current_trace_id
+
+                tid = current_trace_id.get()
+                if tid:
+                    await _trace_manager.finish_trace(tid, "failed", error=error_msg)
+            span.set_output({"status": "failed"})
+            return {
+                "status": "failed",
+                "error": error_msg,
+                "messages": state["messages"] + [{"role": "system", "content": error_msg}],
+            }
 
 
 # ============================================================
@@ -385,6 +457,7 @@ async def retry_check(state: TicketState) -> dict:
 def build_ticket_graph(
     settings: Settings | None = None,
     agents: dict | None = None,
+    trace_manager: "TraceManager | None" = None,
 ) -> StateGraph:
     """构建工单处理状态图。
 
@@ -399,8 +472,8 @@ def build_ticket_graph(
     Returns:
         已编译的 CompiledStateGraph，可直接调用 invoke/ainvoke
     """
-    # 注入 Agent 到模块级变量
-    global _classifier_agent, _processor_agent, _reviewer_agent  # noqa: PLW0603
+    # 注入 Agent 和 TraceManager 到模块级变量
+    global _classifier_agent, _processor_agent, _reviewer_agent, _trace_manager  # noqa: PLW0603
 
     if agents is not None:
         _classifier_agent = agents.get("classifier")
@@ -410,6 +483,8 @@ def build_ticket_graph(
         _classifier_agent = None
         _processor_agent = None
         _reviewer_agent = None
+
+    _trace_manager = trace_manager
 
     graph = StateGraph(TicketState)
 
