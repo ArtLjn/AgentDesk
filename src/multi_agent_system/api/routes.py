@@ -221,16 +221,42 @@ async def upload_knowledge(
 # ============================================================
 
 
+@router.post("/tickets/{ticket_id}/feedback", response_model=dict)
+async def submit_feedback(
+    ticket_id: str,
+    body: dict[str, Any],
+    request: Request,
+) -> dict:
+    """提交用户对工单处理结果的满意度反馈。"""
+    from src.multi_agent_system.core.evaluation import EvaluationCollector
+
+    satisfied = body.get("satisfied", False)
+    db_manager = request.app.state.db_manager
+    collector = EvaluationCollector(db_manager=db_manager)
+
+    try:
+        await collector.record_user_feedback(ticket_id, satisfied)
+        return {"status": "ok", "ticket_id": ticket_id, "satisfied": satisfied}
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
 @router.get("/analytics", response_model=dict)
 async def get_analytics(request: Request) -> dict:
-    """获取统计面板数据：分类分布 + 优先级分布 + 处理统计。"""
+    """获取统计面板数据：分类分布 + 优先级分布 + 处理统计 + 评估指标。"""
+    from src.multi_agent_system.core.evaluation import EvaluationCollector
+
+    db_manager = request.app.state.db_manager
     analytics_tool = request.app.state.analytics_tool
+    collector = EvaluationCollector(db_manager=db_manager)
 
     return {
         "category_distribution": await analytics_tool.get_category_distribution(),
         "priority_distribution": await analytics_tool.get_priority_distribution(),
         "resolution_stats": await analytics_tool.get_resolution_stats(),
         "daily_stats": await analytics_tool.get_daily_stats(),
+        "efficiency": await collector.get_efficiency_stats(),
+        "evaluation": await collector.get_evaluation_summary(),
     }
 
 

@@ -38,6 +38,7 @@ def app():
     mock_knowledge_tool = MagicMock()
 
     # 注入到 app.state（模拟 lifespan 中初始化的依赖）
+    app.state.db_manager = db_manager
     app.state.db_tool = db_tool
     app.state.workflow = mock_workflow
     app.state.knowledge_tool = mock_knowledge_tool

@@ -64,6 +64,7 @@ async def lifespan(app: FastAPI):
 
     # 存到 app.state 供路由使用
     app.state.settings = settings
+    app.state.db_manager = db_tool._db
     app.state.db_tool = db_tool
     app.state.notification_tool = notification_tool
     app.state.analytics_tool = analytics_tool
