@@ -1,0 +1,23 @@
+.git
+.claude
+.worktrees
+openspec
+docs
+tests
+venv
+.env
+.env.*
+*.pyc
+__pycache__
+*.egg-info
+.DS_Store
+*.tmp
+*.bak
+
+# Node
+web/node_modules
+web/dist
+
+# IDE
+.idea
+.vscode

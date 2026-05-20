@@ -12,15 +12,16 @@ services:
     build:
       context: .
       args:
-        - PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+        - PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn
     ports:
-      - "8000:8000"
+      - "8001:8000"
     depends_on:
       - qdrant
     env_file:
       - .env
     environment:
       - QDRANT_URL=http://qdrant:6333
+      - EMBEDDING_BASE_URL=http://host.docker.internal:11434
       - CACHE_ENABLED=true
       - CACHE_MAX_SIZE=512
       - CACHE_TTL=300
