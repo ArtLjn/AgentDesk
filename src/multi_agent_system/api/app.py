@@ -6,10 +6,11 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
 from loguru import logger
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
+from starlette.staticfiles import StaticFiles
 
 from src.multi_agent_system.agents.classifier import ClassifierAgent
 from src.multi_agent_system.agents.coordinator import CoordinatorAgent
@@ -217,12 +218,36 @@ from src.multi_agent_system.api.routes import router  # noqa: E402
 
 app.include_router(router, prefix="/api")
 
+# React SPA 静态文件托管
+# 构建产物位于 web/dist/，由 Vite 生成
+_WEB_DIST = Path(__file__).parent.parent.parent.parent / "web" / "dist"
+_WEB_INDEX = _WEB_DIST / "index.html"
+
 
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
-async def index() -> str:
-    """返回内置 Web UI 页面。"""
-    html_path = Path(__file__).parent.parent / "web" / "index.html"
-    return html_path.read_text(encoding="utf-8")
+async def index() -> Response:
+    """返回 React SPA 入口页面。"""
+    if _WEB_INDEX.exists():
+        return HTMLResponse(_WEB_INDEX.read_text(encoding="utf-8"))
+    # 降级：无构建产物时返回旧版内置 HTML
+    legacy_html = Path(__file__).parent.parent / "web" / "index.html"
+    if legacy_html.exists():
+        return HTMLResponse(legacy_html.read_text(encoding="utf-8"))
+    return HTMLResponse("<h1>No frontend found. Run <code>cd web && npm run build</code></h1>", status_code=404)
+
+
+# SPA fallback：所有非 /api 和非静态文件的请求返回 index.html
+@app.get("/{path:path}", response_class=HTMLResponse, include_in_schema=False)
+async def spa_fallback(path: str) -> Response:
+    """SPA 路由回退：未匹配的路径返回 index.html 交给 React Router 处理。"""
+    # 静态文件优先
+    static_file = _WEB_DIST / path
+    if static_file.exists() and static_file.is_file():
+        return Response(content=static_file.read_bytes(), media_type="application/octet-stream")
+    # SPA fallback
+    if _WEB_INDEX.exists():
+        return HTMLResponse(_WEB_INDEX.read_text(encoding="utf-8"))
+    return HTMLResponse("<h1>Not Found</h1>", status_code=404)
 
 
 @app.get("/health")
