@@ -218,38 +218,6 @@ from src.multi_agent_system.api.routes import router  # noqa: E402
 
 app.include_router(router, prefix="/api")
 
-# React SPA 静态文件托管
-# 构建产物位于 web/dist/，由 Vite 生成
-_WEB_DIST = Path(__file__).parent.parent.parent.parent / "web" / "dist"
-_WEB_INDEX = _WEB_DIST / "index.html"
-
-# 挂载 assets 目录（正确 MIME 类型）
-_ASSETS_DIR = _WEB_DIST / "assets"
-if _ASSETS_DIR.is_dir():
-    app.mount("/assets", StaticFiles(directory=str(_ASSETS_DIR)), name="static_assets")
-
-# SPA 首页
-@app.get("/", response_class=HTMLResponse, include_in_schema=False)
-async def _spa_index() -> Response:
-    if _WEB_INDEX.exists():
-        return HTMLResponse(_WEB_INDEX.read_text(encoding="utf-8"))
-    legacy_html = Path(__file__).parent.parent / "web" / "index.html"
-    if legacy_html.exists():
-        return HTMLResponse(legacy_html.read_text(encoding="utf-8"))
-    return HTMLResponse("<h1>No frontend. Run <code>cd web && npm run build</code></h1>", status_code=404)
-
-# SPA fallback：/favicon、/tickets、/monitor 等非 API 路径回退到 index.html
-@app.get("/{path:path}", response_class=HTMLResponse, include_in_schema=False)
-async def _spa_fallback(path: str) -> Response:
-    # 静态文件在 dist/ 中（如 favicon.svg）直接返回
-    static_file = _WEB_DIST / path
-    if static_file.is_file():
-        return FileResponse(str(static_file))
-    # 其他所有路径交给 React Router
-    if _WEB_INDEX.exists():
-        return HTMLResponse(_WEB_INDEX.read_text(encoding="utf-8"))
-    return HTMLResponse("<h1>Not Found</h1>", status_code=404)
-
 
 @app.get("/health")
 async def health_check() -> dict:
@@ -288,3 +256,37 @@ async def prometheus_metrics():
         content=generate_latest(),
         media_type=CONTENT_TYPE_LATEST,
     )
+
+
+# ============================================================
+# React SPA 静态文件托管（必须放在所有 API 路由之后）
+# ============================================================
+_WEB_DIST = Path(__file__).parent.parent.parent.parent / "web" / "dist"
+_WEB_INDEX = _WEB_DIST / "index.html"
+
+# 挂载 assets 目录（正确 MIME 类型）
+_ASSETS_DIR = _WEB_DIST / "assets"
+if _ASSETS_DIR.is_dir():
+    app.mount("/assets", StaticFiles(directory=str(_ASSETS_DIR)), name="static_assets")
+
+
+@app.get("/", response_class=HTMLResponse, include_in_schema=False)
+async def _spa_index() -> Response:
+    """React SPA 首页。"""
+    if _WEB_INDEX.exists():
+        return HTMLResponse(_WEB_INDEX.read_text(encoding="utf-8"))
+    legacy_html = Path(__file__).parent.parent / "web" / "index.html"
+    if legacy_html.exists():
+        return HTMLResponse(legacy_html.read_text(encoding="utf-8"))
+    return HTMLResponse("<h1>No frontend. Run <code>cd web && npm run build</code></h1>", status_code=404)
+
+
+@app.get("/{path:path}", response_class=HTMLResponse, include_in_schema=False)
+async def _spa_fallback(path: str) -> Response:
+    """SPA 路由回退：dist 中的静态文件直接返回，其余交给 React Router。"""
+    static_file = _WEB_DIST / path
+    if static_file.is_file():
+        return FileResponse(str(static_file))
+    if _WEB_INDEX.exists():
+        return HTMLResponse(_WEB_INDEX.read_text(encoding="utf-8"))
+    return HTMLResponse("<h1>Not Found</h1>", status_code=404)
