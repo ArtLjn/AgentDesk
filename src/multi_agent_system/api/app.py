@@ -223,30 +223,10 @@ app.include_router(router, prefix="/api")
 _WEB_DIST = Path(__file__).parent.parent.parent.parent / "web" / "dist"
 _WEB_INDEX = _WEB_DIST / "index.html"
 
-# 用 StaticFiles 挂载 assets 目录（自动处理 MIME 类型）
-_ASSETS_DIR = _WEB_DIST / "assets"
-if _ASSETS_DIR.is_dir():
-    app.mount("/assets", StaticFiles(directory=str(_ASSETS_DIR)), name="static_assets")
-
-
-@app.get("/", response_class=HTMLResponse, include_in_schema=False)
-async def index() -> Response:
-    """返回 React SPA 入口页面。"""
-    if _WEB_INDEX.exists():
-        return HTMLResponse(_WEB_INDEX.read_text(encoding="utf-8"))
-    legacy_html = Path(__file__).parent.parent / "web" / "index.html"
-    if legacy_html.exists():
-        return HTMLResponse(legacy_html.read_text(encoding="utf-8"))
-    return HTMLResponse("<h1>No frontend found. Run <code>cd web && npm run build</code></h1>", status_code=404)
-
-
-# SPA fallback：所有非 /api、非 /assets 的请求返回 index.html
-@app.get("/{path:path}", response_class=HTMLResponse, include_in_schema=False)
-async def spa_fallback(path: str) -> Response:
-    """SPA 路由回退：未匹配的路径返回 index.html 交给 React Router 处理。"""
-    if _WEB_INDEX.exists():
-        return HTMLResponse(_WEB_INDEX.read_text(encoding="utf-8"))
-    return HTMLResponse("<h1>Not Found</h1>", status_code=404)
+# 用 StaticFiles 挂载整个 dist 目录（自动处理 MIME 类型）
+# mount 放在所有路由之后，避免拦截 /api 请求
+if _WEB_DIST.is_dir():
+    app.mount("/", StaticFiles(directory=str(_WEB_DIST), html=True), name="spa")
 
 
 @app.get("/health")
