@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import HTMLResponse, FileResponse, Response
 from loguru import logger
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
@@ -223,10 +223,32 @@ app.include_router(router, prefix="/api")
 _WEB_DIST = Path(__file__).parent.parent.parent.parent / "web" / "dist"
 _WEB_INDEX = _WEB_DIST / "index.html"
 
-# 用 StaticFiles 挂载整个 dist 目录（自动处理 MIME 类型）
-# mount 放在所有路由之后，避免拦截 /api 请求
-if _WEB_DIST.is_dir():
-    app.mount("/", StaticFiles(directory=str(_WEB_DIST), html=True), name="spa")
+# 挂载 assets 目录（正确 MIME 类型）
+_ASSETS_DIR = _WEB_DIST / "assets"
+if _ASSETS_DIR.is_dir():
+    app.mount("/assets", StaticFiles(directory=str(_ASSETS_DIR)), name="static_assets")
+
+# SPA 首页
+@app.get("/", response_class=HTMLResponse, include_in_schema=False)
+async def _spa_index() -> Response:
+    if _WEB_INDEX.exists():
+        return HTMLResponse(_WEB_INDEX.read_text(encoding="utf-8"))
+    legacy_html = Path(__file__).parent.parent / "web" / "index.html"
+    if legacy_html.exists():
+        return HTMLResponse(legacy_html.read_text(encoding="utf-8"))
+    return HTMLResponse("<h1>No frontend. Run <code>cd web && npm run build</code></h1>", status_code=404)
+
+# SPA fallback：/favicon、/tickets、/monitor 等非 API 路径回退到 index.html
+@app.get("/{path:path}", response_class=HTMLResponse, include_in_schema=False)
+async def _spa_fallback(path: str) -> Response:
+    # 静态文件在 dist/ 中（如 favicon.svg）直接返回
+    static_file = _WEB_DIST / path
+    if static_file.is_file():
+        return FileResponse(str(static_file))
+    # 其他所有路径交给 React Router
+    if _WEB_INDEX.exists():
+        return HTMLResponse(_WEB_INDEX.read_text(encoding="utf-8"))
+    return HTMLResponse("<h1>Not Found</h1>", status_code=404)
 
 
 @app.get("/health")
