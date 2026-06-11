@@ -7,6 +7,7 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 import { Skeleton } from '@/components/ui/skeleton'
 import {
   Activity, RefreshCw, Clock, Cpu, Bot, Wrench, Zap, ArrowDownUp,
+  ChevronRight, ChevronDown, FileJson, ArrowRightLeft, Info,
 } from 'lucide-react'
 
 const traceStatusStyles: Record<string, string> = {
@@ -207,13 +208,23 @@ function StatItem({ label, value }: { label: string; value: string | number }) {
 }
 
 function SpanTree({ span, depth }: { span: any; depth: number }) {
+  const [expanded, setExpanded] = useState(false)
   const typeIcons: Record<string, any> = { node: Cpu, react_iter: Bot, llm_call: Zap, tool_call: Wrench }
   const Icon = typeIcons[span.span_type] || Cpu
   const dot = spanStatusDot[span.status] || 'bg-muted-foreground'
+  const hasDetail = span.input_data || span.output_data || span.metadata
 
   return (
     <div style={{ paddingLeft: depth * 16 }}>
-      <div className="flex items-center gap-2 p-2 rounded-md bg-background border border-border text-xs mb-1">
+      <div
+        className={`flex items-center gap-2 p-2 rounded-md bg-background border border-border text-xs mb-1 cursor-pointer transition-colors hover:border-primary/50 ${hasDetail ? '' : ''}`}
+        onClick={() => hasDetail && setExpanded(!expanded)}
+      >
+        {hasDetail ? (
+          expanded ? <ChevronDown className="w-3 h-3 text-muted-foreground shrink-0" /> : <ChevronRight className="w-3 h-3 text-muted-foreground shrink-0" />
+        ) : (
+          <div className="w-3 shrink-0" />
+        )}
         <div className={`w-2 h-2 rounded-full ${dot} shrink-0`} />
         <Icon className="w-3 h-3 text-muted-foreground shrink-0" />
         <div className="flex-1 min-w-0">
@@ -225,9 +236,45 @@ function SpanTree({ span, depth }: { span: any; depth: number }) {
           {span.duration != null ? `${span.duration.toFixed(3)}s` : '-'}
         </span>
       </div>
+      {expanded && hasDetail && (
+        <div className="ml-5 mb-1 rounded-md border border-border bg-background/50 p-2 text-xs space-y-2">
+          {span.input_data && (
+            <DetailSection icon={<ArrowRightLeft className="w-3 h-3 text-blue-400" />} title="输入" data={span.input_data} />
+          )}
+          {span.output_data && (
+            <DetailSection icon={<FileJson className="w-3 h-3 text-green-400" />} title="输出" data={span.output_data} />
+          )}
+          {span.metadata && (
+            <DetailSection icon={<Info className="w-3 h-3 text-yellow-400" />} title="元数据" data={span.metadata} />
+          )}
+        </div>
+      )}
       {span.children?.map((child: any) => (
         <SpanTree key={child.span_id} span={child} depth={depth + 1} />
       ))}
+    </div>
+  )
+}
+
+function DetailSection({ icon, title, data }: { icon: React.ReactNode; title: string; data: any }) {
+  const [collapsed, setCollapsed] = useState(false)
+  const content = typeof data === 'string' ? data : JSON.stringify(data, null, 2)
+  const isLong = content.length > 500
+
+  return (
+    <div>
+      <div className="flex items-center gap-1.5 cursor-pointer select-none" onClick={() => setCollapsed(!collapsed)}>
+        {icon}
+        <span className="font-medium text-muted-foreground">{title}</span>
+        {isLong && (
+          collapsed ? <ChevronRight className="w-3 h-3 text-muted-foreground" /> : <ChevronDown className="w-3 h-3 text-muted-foreground" />
+        )}
+      </div>
+      {!collapsed && (
+        <pre className="mt-1 p-2 rounded bg-card border border-border overflow-x-auto max-h-64 overflow-y-auto text-[11px] text-foreground/80 whitespace-pre-wrap break-all">
+          {isLong && !collapsed ? content.slice(0, 500) + '...' : content}
+        </pre>
+      )}
     </div>
   )
 }

@@ -12,8 +12,8 @@ export default defineConfig({
   },
   server: {
     proxy: {
-      '/api': 'http://localhost:8001',
-      '/health': 'http://localhost:8001',
+      '/api': 'http://172.16.58.68:8001',
+      '/health': 'http://172.16.58.68:8001',
     },
   },
 })

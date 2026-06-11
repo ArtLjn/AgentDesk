@@ -175,10 +175,20 @@ class TraceManager:
         span_type: str,
         parent_span_id: str | None = None,
         input_data: dict[str, Any] | None = None,
+        trace_id: str | None = None,
     ) -> SpanContext:
-        """创建 span context manager。自动从 context variable 获取 trace_id 和 parent。"""
-        trace_id = current_trace_id.get()
-        if trace_id is None:
+        """创建 span context manager。自动从 context variable 获取 trace_id 和 parent。
+
+        Args:
+            name: span 名称
+            span_type: span 类型
+            parent_span_id: 父 span ID
+            input_data: 输入数据
+            trace_id: 显式指定 trace_id（用于跨 task 场景，优先于 contextvar）
+        """
+        # 优先使用显式传入的 trace_id（跨 task 兼容）
+        effective_trace_id = trace_id if trace_id is not None else current_trace_id.get()
+        if effective_trace_id is None:
             # 无活跃 trace，返回 no-op span
             return _NoOpSpanContext()
 
@@ -190,7 +200,7 @@ class TraceManager:
         return SpanContext(
             trace_manager=self,
             span_id=span_id,
-            trace_id=trace_id,
+            trace_id=effective_trace_id,
             name=name,
             span_type=span_type,
             parent_span_id=parent_span_id,

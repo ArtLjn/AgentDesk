@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from contextvars import copy_context
 from datetime import datetime
 from functools import partial
 from typing import Any
@@ -52,7 +53,6 @@ async def create_ticket(body: TicketCreate, request: Request) -> dict:
     await db_tool.save_ticket(ticket_data)
 
     # 后台异步执行工作流
-    workflow = request.app.state.workflow
     asyncio.create_task(
         _run_workflow(request.app, ticket_id, state)
     )
@@ -89,7 +89,6 @@ async def create_batch_tickets(body: BatchTicketCreate, request: Request) -> dic
         await db_tool.save_ticket(ticket_data)
 
         # 后台异步执行工作流
-        workflow = request.app.state.workflow
         asyncio.create_task(
             _run_workflow(request.app, ticket_id, state)
         )
@@ -404,6 +403,12 @@ async def _run_workflow(app: Any, ticket_id: str, state: dict) -> None:
     workflow = app.state.workflow
     db_tool = app.state.db_tool
     current_state = dict(state)
+
+    # 恢复 trace context：从 state 中取出 trace_id 并设置到 contextvar
+    trace_id = state.get("__trace_id__")
+    if trace_id:
+        from src.multi_agent_system.core.trace import current_trace_id
+        current_trace_id.set(trace_id)
 
     try:
         # 流式执行：每完成一个节点就推送一次更新

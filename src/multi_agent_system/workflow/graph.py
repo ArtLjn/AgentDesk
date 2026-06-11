@@ -89,6 +89,9 @@ _memory_manager = None
 # 模块级 TraceManager 引用（由 lifespan 注入）
 _trace_manager = None
 
+# 模块级活跃 trace_id（用于跨 task 传播，绕过 contextvar 限制）
+_active_trace_id: str | None = None
+
 
 class _NoOpSpanContext:
     """无活跃 trace 时的空操作 span。"""
@@ -112,19 +115,57 @@ class _NoOpSpanContext:
         return False
 
 
+def _restore_trace_context(state: TicketState) -> None:
+    """从 state 中恢复 trace context（用于后台 task 跨节点传播）。"""
+    global _active_trace_id  # noqa: PLW0603
+    trace_id = state.get("__trace_id__")
+    logger.debug(f"[_restore_trace_context] trace_id from state={trace_id}, current _active_trace_id={_active_trace_id}")
+    if trace_id is not None:
+        from src.multi_agent_system.core.trace import current_trace_id
+        current_trace_id.set(trace_id)
+        _active_trace_id = trace_id
+        logger.debug(f"[_restore_trace_context] set _active_trace_id={trace_id}")
+
+
 def _span(name: str, span_type: str = "node", **kwargs: Any):
-    """获取当前 span context manager，无 TraceManager 时返回 no-op。"""
-    if _trace_manager is not None:
-        return _trace_manager.start_span(name, span_type, **kwargs)
-    return _NoOpSpanContext()
+    """获取当前 span context manager，无 TraceManager 时返回 no-op。
+
+    优先使用模块级 _active_trace_id（跨 task 兼容），
+    其次使用 contextvar current_trace_id。
+    """
+    if _trace_manager is None:
+        logger.debug(f"[_span] {name}: _trace_manager is None")
+        return _NoOpSpanContext()
+
+    # 优先使用模块级 trace_id（跨 task 传播）
+    trace_id = _active_trace_id
+    if trace_id is None:
+        from src.multi_agent_system.core.trace import current_trace_id
+        trace_id = current_trace_id.get()
+
+    if trace_id is None:
+        logger.debug(f"[_span] {name}: trace_id is None")
+        return _NoOpSpanContext()
+
+    logger.debug(f"[_span] {name}: using trace_id={trace_id}")
+    return _trace_manager.start_span(
+        name=name,
+        span_type=span_type,
+        trace_id=trace_id,
+        **kwargs,
+    )
 
 
 async def receive(state: TicketState) -> dict:
     """初始化工单状态，加载用户长期记忆。"""
     with log_context(agent="receive"):
-        # 启动 trace
+        # 启动 trace，并将 trace_id 写回 state 供后续节点恢复 context
+        trace_id = None
         if _trace_manager is not None:
-            await _trace_manager.start_trace(state["ticket_id"])
+            trace_id = await _trace_manager.start_trace(state["ticket_id"])
+
+        # 恢复 trace context（从 state 中读取，兼容后台 task 场景）
+        _restore_trace_context(state)
 
         async with _span("receive", input_data={"content": state["content"]}) as span:
             # Load user context if user_id present
@@ -138,6 +179,7 @@ async def receive(state: TicketState) -> dict:
                 "user_context": user_context,
                 "messages": state.get("messages", [])
                 + [{"role": "system", "content": f"工单 {state['ticket_id']} 已接收"}],
+                "__trace_id__": trace_id,
             }
             span.set_output({"status": "received"})
             return result
@@ -149,6 +191,7 @@ async def classify(state: TicketState) -> dict:
     Agent 内部的重试和降级由 @with_retry 装饰器统一处理，
     此处仅保留 Agent 实例不可用时的占位实现。
     """
+    _restore_trace_context(state)
     with log_context(agent="classifier"):
         async with _span("classify", input_data={"content": state["content"]}) as span:
             content = state["content"]
@@ -211,6 +254,7 @@ async def route(state: TicketState) -> dict:
 
     本节点不做状态修改，仅作为条件路由的汇聚点。
     """
+    _restore_trace_context(state)
     with log_context(agent="router"):
         return {}
 
@@ -221,6 +265,7 @@ async def process(state: TicketState) -> dict:
     Agent 内部的重试和降级由 @with_retry 装饰器统一处理，
     此处仅保留 Agent 实例不可用时的占位实现。
     """
+    _restore_trace_context(state)
     with log_context(agent="processor"):
         async with _span("process", input_data={"category": state.get("category"), "priority": state.get("priority")}) as span:
             category = state.get("category", "")
@@ -263,6 +308,7 @@ async def review(state: TicketState) -> dict:
     Agent 内部的重试和降级由 @with_retry 装饰器统一处理，
     此处仅保留 Agent 实例不可用时的占位实现。
     """
+    _restore_trace_context(state)
     with log_context(agent="reviewer"):
         async with _span("review", input_data={"retry_count": state.get("retry_count", 0)}) as span:
             retry_count = state.get("retry_count", 0)
@@ -302,6 +348,7 @@ async def review(state: TicketState) -> dict:
 
 async def auto_reply(state: TicketState) -> dict:
     """咨询类工单直接生成回复。"""
+    _restore_trace_context(state)
     with log_context(agent="auto_reply"):
         async with _span("auto_reply", input_data={"category": state.get("category")}) as span:
             reply = f"感谢您的咨询。关于「{state['content'][:50]}」，已为您生成自动回复。"
@@ -315,6 +362,7 @@ async def auto_reply(state: TicketState) -> dict:
 
 async def escalate(state: TicketState) -> dict:
     """升级节点：P0 或投诉类工单标记需要人工处理。"""
+    _restore_trace_context(state)
     with log_context(agent="escalation"):
         async with _span("escalate", input_data={"category": state.get("category"), "priority": state.get("priority")}) as span:
             category = state.get("category", "")
@@ -338,6 +386,7 @@ async def escalate(state: TicketState) -> dict:
 
 async def notify(state: TicketState) -> dict:
     """发送处理结果通知。"""
+    _restore_trace_context(state)
     with log_context(agent="notification"):
         async with _span("notify", input_data={"has_result": bool(state.get("processing_result"))}) as span:
             result = state.get("processing_result", "无处理结果")
@@ -351,6 +400,7 @@ async def notify(state: TicketState) -> dict:
 
 async def complete(state: TicketState) -> dict:
     """归档节点：标记工单状态为已完成。"""
+    _restore_trace_context(state)
     with log_context(agent="complete"):
         async with _span("complete") as span:
             if _trace_manager is not None:
@@ -369,6 +419,7 @@ async def complete(state: TicketState) -> dict:
 
 async def handle_failure(state: TicketState) -> dict:
     """失败处理节点：标记工单状态为失败。"""
+    _restore_trace_context(state)
     with log_context(agent="failure_handler"):
         async with _span("handle_failure", input_data={"error": state.get("error")}) as span:
             error_msg = state.get("error", f"工单处理失败，已达最大重试次数({_get_settings().max_retries}次)")
