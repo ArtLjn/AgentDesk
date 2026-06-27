@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS tickets (
     category TEXT,
     priority TEXT,
     processing_result TEXT,
+    references_json TEXT,
     review_score REAL,
     retry_count INTEGER DEFAULT 0,
     status TEXT DEFAULT 'received',
@@ -96,6 +97,30 @@ CREATE INDEX IF NOT EXISTS idx_spans_parent ON spans(parent_span_id);
 CREATE INDEX IF NOT EXISTS idx_spans_type ON spans(span_type);
 CREATE INDEX IF NOT EXISTS idx_traces_ticket ON traces(ticket_id);
 CREATE INDEX IF NOT EXISTS idx_traces_status ON traces(status);
+
+CREATE TABLE IF NOT EXISTS human_reviews (
+    review_id        TEXT PRIMARY KEY,
+    ticket_id        TEXT NOT NULL,
+    trigger_type     TEXT NOT NULL,
+    trigger_reason   TEXT,
+    ai_suggestion    TEXT,
+    decision         TEXT,
+    decision_reason  TEXT,
+    rewritten_result TEXT,
+    reviewer_id      TEXT,
+    status           TEXT NOT NULL,
+    created_at       TIMESTAMP,
+    decided_at       TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_hr_status   ON human_reviews(status);
+CREATE INDEX IF NOT EXISTS idx_hr_ticket   ON human_reviews(ticket_id);
+CREATE INDEX IF NOT EXISTS idx_hr_trigger  ON human_reviews(trigger_type);
+CREATE INDEX IF NOT EXISTS idx_hr_reviewer ON human_reviews(reviewer_id);
+
+-- 部分索引：加速待审核工单查询。SQLite 3.8.0+ 支持。
+CREATE INDEX IF NOT EXISTS idx_tickets_pending
+    ON tickets(created_at) WHERE status = 'pending_human_review';
 """
 
 
@@ -112,8 +137,19 @@ class DatabaseManager:
         self._connection = await aiosqlite.connect(self._db_path)
         self._connection.row_factory = aiosqlite.Row
         await self._connection.executescript(_SCHEMA_SQL)
+        await self._ensure_column("tickets", "references_json", "TEXT")
         await self._connection.commit()
         logger.info(f"[Database] Initialized: {self._db_path}")
+
+    async def _ensure_column(self, table: str, column: str, definition: str) -> None:
+        """为旧数据库补充新增字段。"""
+        if self._connection is None:
+            raise RuntimeError("Database not initialized. Call initialize() first.")
+        cursor = await self._connection.execute(f"PRAGMA table_info({table})")
+        rows = await cursor.fetchall()
+        if column in {row["name"] for row in rows}:
+            return
+        await self._connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
     @asynccontextmanager
     async def connection(self) -> AsyncGenerator[aiosqlite.Connection, None]:
@@ -133,13 +169,24 @@ class DatabaseManager:
     async def save_ticket(self, ticket_data: dict[str, Any]) -> None:
         """保存或更新工单记录。"""
         async with self.connection() as conn:
+            references = ticket_data.get("references")
+            if "references" not in ticket_data:
+                cursor = await conn.execute(
+                    "SELECT references_json FROM tickets WHERE ticket_id = ?",
+                    (ticket_data.get("ticket_id"),),
+                )
+                row = await cursor.fetchone()
+                references_json = row["references_json"] if row else None
+            else:
+                references_json = json.dumps(references or [], ensure_ascii=False)
+
             await conn.execute(
                 """INSERT OR REPLACE INTO tickets (
                     ticket_id, user_id, content, category, priority,
-                    processing_result, review_score, retry_count, status,
+                    processing_result, references_json, review_score, retry_count, status,
                     error, resolved_at, satisfied, token_count,
                     tool_call_count, total_duration
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     ticket_data.get("ticket_id"),
                     ticket_data.get("user_id"),
@@ -147,6 +194,7 @@ class DatabaseManager:
                     ticket_data.get("category"),
                     ticket_data.get("priority"),
                     ticket_data.get("processing_result"),
+                    references_json,
                     ticket_data.get("review_score"),
                     ticket_data.get("retry_count", 0),
                     ticket_data.get("status", "received"),
@@ -350,7 +398,21 @@ class DatabaseManager:
         """按 ticket_id 查询 trace。"""
         async with self.connection() as conn:
             cursor = await conn.execute(
-                "SELECT * FROM traces WHERE ticket_id = ? ORDER BY start_time DESC LIMIT 1",
+                """
+                SELECT
+                    tr.*,
+                    tk.content AS ticket_content,
+                    tk.category AS ticket_category,
+                    tk.priority AS ticket_priority,
+                    tk.processing_result AS ticket_result,
+                    tk.review_score AS ticket_review_score,
+                    tk.references_json AS ticket_references_json
+                FROM traces tr
+                LEFT JOIN tickets tk ON tk.ticket_id = tr.ticket_id
+                WHERE tr.ticket_id = ?
+                ORDER BY tr.start_time DESC
+                LIMIT 1
+                """,
                 (ticket_id,),
             )
             row = await cursor.fetchone()
@@ -363,17 +425,40 @@ class DatabaseManager:
         offset: int = 0,
     ) -> list[dict[str, Any]]:
         """查询 trace 列表，按 start_time DESC 排序。"""
-        query = "SELECT * FROM traces"
+        query = """
+            SELECT
+                tr.*,
+                tk.content AS ticket_content,
+                tk.category AS ticket_category,
+                tk.priority AS ticket_priority,
+                tk.processing_result AS ticket_result,
+                tk.review_score AS ticket_review_score,
+                tk.references_json AS ticket_references_json
+            FROM traces tr
+            LEFT JOIN tickets tk ON tk.ticket_id = tr.ticket_id
+        """
         params: list[Any] = []
         if status:
-            query += " WHERE status = ?"
+            query += " WHERE tr.status = ?"
             params.append(status)
-        query += " ORDER BY start_time DESC LIMIT ? OFFSET ?"
+        query += " ORDER BY tr.start_time DESC LIMIT ? OFFSET ?"
         params.extend([limit, offset])
         async with self.connection() as conn:
             cursor = await conn.execute(query, params)
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
+
+    async def count_traces(self, status: str | None = None) -> int:
+        """统计 trace 总数，用于分页。"""
+        query = "SELECT COUNT(*) as total FROM traces"
+        params: list[Any] = []
+        if status:
+            query += " WHERE status = ?"
+            params.append(status)
+        async with self.connection() as conn:
+            cursor = await conn.execute(query, params)
+            row = await cursor.fetchone()
+            return int(row["total"]) if row else 0
 
     async def get_trace_stats(self, trace_id: str) -> dict[str, Any] | None:
         """获取 trace 的耗时统计。"""
@@ -455,6 +540,153 @@ class DatabaseManager:
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
 
+    # Human Review CRUD
+    # ============================================================
+
+    async def create_pending_review(self, review: dict[str, Any]) -> None:
+        """创建待审核单。
+
+        Args:
+            review: 包含 review_id / ticket_id / trigger_type / trigger_reason /
+                ai_suggestion 等字段的字典
+        """
+        ai_suggestion_raw = review.get("ai_suggestion")
+        if isinstance(ai_suggestion_raw, dict):
+            ai_suggestion_json = json.dumps(ai_suggestion_raw, ensure_ascii=False)
+        elif ai_suggestion_raw is None:
+            ai_suggestion_json = None
+        else:
+            ai_suggestion_json = str(ai_suggestion_raw)
+
+        async with self.connection() as conn:
+            await conn.execute(
+                """INSERT INTO human_reviews (
+                    review_id, ticket_id, trigger_type, trigger_reason,
+                    ai_suggestion, status, created_at
+                ) VALUES (?, ?, ?, ?, ?, 'pending', ?)""",
+                (
+                    review.get("review_id"),
+                    review.get("ticket_id"),
+                    review.get("trigger_type"),
+                    review.get("trigger_reason"),
+                    ai_suggestion_json,
+                    review.get("created_at"),
+                ),
+            )
+            await conn.commit()
+
+    async def get_pending_review_by_ticket(
+        self, ticket_id: str
+    ) -> dict[str, Any] | None:
+        """按工单 ID 查询最新待审核记录。"""
+        async with self.connection() as conn:
+            cursor = await conn.execute(
+                "SELECT * FROM human_reviews WHERE ticket_id = ? "
+                "ORDER BY created_at DESC LIMIT 1",
+                (ticket_id,),
+            )
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
+    async def update_review_decision(
+        self, review_id: str, updates: dict[str, Any]
+    ) -> None:
+        """更新审核单的决策信息。
+
+        Args:
+            review_id: 审核单 ID
+            updates: 包含 decision / decision_reason / rewritten_result /
+                reviewer_id / status / decided_at 等字段的字典
+        """
+        allowed = {
+            "decision", "decision_reason", "rewritten_result",
+            "reviewer_id", "status", "decided_at",
+        }
+        set_parts = [f"{k} = ?" for k in updates if k in allowed]
+        values = [v for k, v in updates.items() if k in allowed]
+        if not set_parts:
+            return
+        values.append(review_id)
+        async with self.connection() as conn:
+            await conn.execute(
+                f"UPDATE human_reviews SET {', '.join(set_parts)} "
+                "WHERE review_id = ?",
+                values,
+            )
+            await conn.commit()
+
+    async def list_pending_reviews(
+        self,
+        status: str | None = None,
+        trigger_type: str | None = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """分页查询审核单列表，可按状态和触发类型筛选。"""
+        query = "SELECT * FROM human_reviews WHERE 1=1"
+        params: list[Any] = []
+        if status:
+            query += " AND status = ?"
+            params.append(status)
+        if trigger_type:
+            query += " AND trigger_type = ?"
+            params.append(trigger_type)
+        query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+        async with self.connection() as conn:
+            cursor = await conn.execute(query, params)
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    async def list_reviews_by_ticket(self, ticket_id: str) -> list[dict[str, Any]]:
+        """查询指定工单的全部审核记录。"""
+        async with self.connection() as conn:
+            cursor = await conn.execute(
+                "SELECT * FROM human_reviews WHERE ticket_id = ? "
+                "ORDER BY created_at ASC",
+                (ticket_id,),
+            )
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    async def get_review_stats(self) -> dict[str, Any]:
+        """统计审核单整体情况：总数、待处理、已处理及按决策/触发类型分布。"""
+        async with self.connection() as conn:
+            cursor = await conn.execute(
+                "SELECT COUNT(*) as total FROM human_reviews"
+            )
+            total = (await cursor.fetchone())["total"]
+
+            cursor = await conn.execute(
+                "SELECT COUNT(*) as cnt FROM human_reviews WHERE status = 'pending'"
+            )
+            pending = (await cursor.fetchone())["cnt"]
+
+            cursor = await conn.execute(
+                "SELECT COUNT(*) as cnt FROM human_reviews WHERE status = 'decided'"
+            )
+            decided = (await cursor.fetchone())["cnt"]
+
+            cursor = await conn.execute(
+                "SELECT decision, COUNT(*) as cnt FROM human_reviews "
+                "WHERE decision IS NOT NULL GROUP BY decision"
+            )
+            by_decision = {row["decision"]: row["cnt"] for row in await cursor.fetchall()}
+
+            cursor = await conn.execute(
+                "SELECT trigger_type, COUNT(*) as cnt FROM human_reviews "
+                "GROUP BY trigger_type"
+            )
+            by_trigger = {row["trigger_type"]: row["cnt"] for row in await cursor.fetchall()}
+
+        return {
+            "total": total,
+            "pending": pending,
+            "decided": decided,
+            "by_decision": by_decision,
+            "by_trigger": by_trigger,
+        }
+
     # Analytics
     async def get_category_distribution(self) -> dict[str, int]:
         """统计各分类的工单数量分布。"""
@@ -513,7 +745,8 @@ _db_manager_instance: DatabaseManager | None = None
 async def get_db_manager() -> DatabaseManager:
     global _db_manager_instance
     if _db_manager_instance is None:
-        _db_manager_instance = DatabaseManager()
+        from src.multi_agent_system.config import Settings
+        _db_manager_instance = DatabaseManager(db_path=Settings().db_path)
         await _db_manager_instance.initialize()
     return _db_manager_instance
 

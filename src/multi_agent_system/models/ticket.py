@@ -2,7 +2,6 @@
 
 from datetime import datetime
 from enum import Enum
-from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -24,6 +23,7 @@ class TicketStatus(str, Enum):
     CLASSIFYING = "classifying"
     PROCESSING = "processing"
     REVIEWING = "reviewing"
+    PENDING_HUMAN_REVIEW = "pending_human_review"
     COMPLETED = "completed"
     FAILED = "failed"
 
@@ -62,6 +62,7 @@ class TicketResponse(BaseModel):
     category: TicketCategory | None = None
     priority: TicketPriority | None = None
     processing_result: str | None = None
+    references: list[str] = Field(default_factory=list)
     review_score: float | None = None
     retry_count: int = 0
     status: TicketStatus = TicketStatus.RECEIVED
