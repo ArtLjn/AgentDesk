@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-from contextvars import copy_context
 from datetime import datetime
 from functools import partial
 from typing import Any
@@ -14,8 +13,6 @@ from src.multi_agent_system.models.ticket import (
     BatchTicketCreate,
     TicketCreate,
     TicketResponse,
-    TicketStatus,
-    TicketStatusUpdate,
 )
 from src.multi_agent_system.workflow.graph import create_initial_state
 
@@ -329,18 +326,304 @@ async def submit_feedback(
     body: dict[str, Any],
     request: Request,
 ) -> dict:
-    """提交用户对工单处理结果的满意度反馈。"""
+    """提交用户对工单处理结果的满意度反馈。
+
+    satisfied=false 且工单已 completed 时，自动创建 user_request 类型 pending
+    审核单，将工单转回人工审核队列。
+    """
+    from datetime import datetime
+
     from src.multi_agent_system.core.evaluation import EvaluationCollector
+    from src.multi_agent_system.core.logging import generate_trace_id
 
     satisfied = body.get("satisfied", False)
-    db_manager = request.app.state.db_manager
+    app = request.app
+    db_manager = app.state.db_manager
+    db_tool = app.state.db_tool
     collector = EvaluationCollector(db_manager=db_manager)
 
     try:
         await collector.record_user_feedback(ticket_id, satisfied)
-        return {"status": "ok", "ticket_id": ticket_id, "satisfied": satisfied}
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+    # 不满意 + 工单已完成 -> 自动转人工审核
+    if not satisfied:
+        ticket = await db_tool.get_ticket(ticket_id)
+        if ticket and ticket.get("status") == "completed":
+            coordinator = getattr(app.state, "coordinator", None)
+            ai_suggestion = None
+            if coordinator is not None:
+                try:
+                    ai_suggestion = await coordinator.suggest_decision(
+                        ticket_id,
+                        "user_request",
+                        "用户反馈不满意",
+                        ticket.get("processing_result"),
+                        ticket.get("review_score"),
+                    )
+                except Exception as ai_err:  # noqa: BLE001
+                    logger.warning(f"feedback AI 建议失败: {ai_err}")
+
+            review_id = f"HR-{generate_trace_id()}"
+            await db_manager.create_pending_review({
+                "review_id": review_id,
+                "ticket_id": ticket_id,
+                "trigger_type": "user_request",
+                "trigger_reason": "用户反馈不满意",
+                "ai_suggestion": ai_suggestion,
+                "created_at": datetime.now().isoformat(),
+            })
+
+            await db_tool.save_ticket({
+                **ticket,
+                "ticket_id": ticket_id,
+                "status": "pending_human_review",
+            })
+
+            await _broadcast_review_event(
+                "review_requested",
+                ticket_id,
+                {
+                    "trigger_type": "user_request",
+                    "priority": ticket.get("priority"),
+                    "review_id": review_id,
+                },
+            )
+
+    return {"status": "ok", "ticket_id": ticket_id, "satisfied": satisfied}
+
+
+# ============================================================
+# 人工审核工作台接口
+# ============================================================
+
+
+_PRIORITY_ORDER = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
+
+
+def _parse_ai_suggestion(raw: Any) -> dict | None:
+    """解析 human_reviews.ai_suggestion 字段（JSON 字符串）。"""
+    if not raw:
+        return None
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+            return parsed if isinstance(parsed, dict) else None
+        except json.JSONDecodeError:
+            return None
+    return None
+
+
+@router.get("/reviews/queue", response_model=dict)
+async def list_review_queue(
+    request: Request,
+    trigger_type: str | None = Query(default=None),
+    category: str | None = Query(default=None),
+    priority: str | None = Query(default=None),
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+) -> dict:
+    """查询待人工审核队列，按优先级 + 等待时长排序。"""
+    db_manager = request.app.state.db_manager
+    rows = await db_manager.list_pending_reviews_with_tickets(
+        trigger_type=trigger_type,
+        category=category,
+        priority=priority,
+        limit=limit,
+        offset=offset,
+    )
+    total = await db_manager.count_pending_reviews(
+        trigger_type=trigger_type,
+        category=category,
+        priority=priority,
+    )
+
+    now = datetime.now()
+    queue: list[dict[str, Any]] = []
+    for row in rows:
+        created_at_str = row.get("created_at")
+        try:
+            created_at = datetime.fromisoformat(created_at_str) if created_at_str else now
+        except ValueError:
+            created_at = now
+        waiting_seconds = int((now - created_at).total_seconds())
+        content = row.get("ticket_content") or ""
+        queue.append({
+            "review_id": row.get("review_id"),
+            "ticket_id": row.get("ticket_id"),
+            "trigger_type": row.get("trigger_type"),
+            "trigger_reason": row.get("trigger_reason"),
+            "content_preview": content[:100],
+            "category": row.get("ticket_category"),
+            "priority": row.get("ticket_priority"),
+            "ai_suggestion": _parse_ai_suggestion(row.get("ai_suggestion")),
+            "waiting_seconds": waiting_seconds,
+            "created_at": created_at_str,
+        })
+
+    # 兜底排序（DB 已排过，二次保险）
+    queue.sort(
+        key=lambda r: (
+            _PRIORITY_ORDER.get(r.get("priority") or "", 9),
+            -(r.get("waiting_seconds") or 0),
+        )
+    )
+
+    return {"queue": queue, "total": total, "limit": limit, "offset": offset}
+
+
+@router.get("/reviews/stats", response_model=dict)
+async def get_review_stats_endpoint(request: Request) -> dict:
+    """返回审核工作台统计数据。"""
+    db_manager = request.app.state.db_manager
+    return await db_manager.get_review_workbench_stats()
+
+
+@router.get("/reviews/{ticket_id}", response_model=dict)
+async def get_review_detail(ticket_id: str, request: Request) -> dict:
+    """返回工单的完整审核上下文。"""
+    db_tool = request.app.state.db_tool
+    db_manager = request.app.state.db_manager
+
+    ticket = await db_tool.get_ticket(ticket_id)
+    if not ticket:
+        raise HTTPException(status_code=404, detail=f"工单 {ticket_id} 不存在")
+
+    reviews = await db_manager.list_reviews_by_ticket(ticket_id)
+    current_review = next((r for r in reviews if r.get("status") == "pending"), None)
+    history_reviews = [
+        {
+            "review_id": r.get("review_id"),
+            "decision": r.get("decision"),
+            "decided_at": r.get("decided_at"),
+            "reviewer_id": r.get("reviewer_id"),
+            "trigger_type": r.get("trigger_type"),
+        }
+        for r in reviews
+        if r.get("status") == "decided"
+    ]
+
+    # trace 摘要
+    trace_summary: dict[str, Any] | None = None
+    trace = await db_manager.get_trace_by_ticket(ticket_id)
+    if trace:
+        trace_summary = {
+            "trace_id": trace.get("trace_id"),
+            "node_count": trace.get("node_count", 0),
+            "duration": trace.get("duration"),
+        }
+
+    current_payload: dict[str, Any] | None = None
+    if current_review:
+        current_payload = {
+            "review_id": current_review.get("review_id"),
+            "trigger_type": current_review.get("trigger_type"),
+            "trigger_reason": current_review.get("trigger_reason"),
+            "ai_suggestion": _parse_ai_suggestion(current_review.get("ai_suggestion")),
+            "created_at": current_review.get("created_at"),
+        }
+
+    return {
+        "ticket_id": ticket_id,
+        "content": ticket.get("content", ""),
+        "category": ticket.get("category"),
+        "priority": ticket.get("priority"),
+        "status": ticket.get("status", "received"),
+        "processing_result": ticket.get("processing_result"),
+        "review_score": ticket.get("review_score"),
+        "retry_count": ticket.get("retry_count", 0),
+        "current_review": current_payload,
+        "history_reviews": history_reviews,
+        "trace_summary": trace_summary,
+    }
+
+
+@router.post("/reviews/{ticket_id}/decision", response_model=dict)
+async def submit_review_decision(
+    ticket_id: str,
+    body: dict[str, Any],
+    request: Request,
+) -> dict:
+    """提交人工审核决策，恢复工作流执行。"""
+    from src.multi_agent_system.models.review import (
+        ReviewDecision,
+        ReviewDecisionRequest,
+    )
+    from src.multi_agent_system.workflow.graph import resume_from_human_decision
+
+    app = request.app
+    db_tool = app.state.db_tool
+
+    # 1. 校验工单存在
+    ticket = await db_tool.get_ticket(ticket_id)
+    if not ticket:
+        raise HTTPException(status_code=404, detail=f"工单 {ticket_id} 不存在")
+
+    # 2. 校验工单状态
+    if ticket.get("status") != "pending_human_review":
+        raise HTTPException(
+            status_code=409,
+            detail=f"工单 {ticket_id} 不在待审核状态（当前状态: {ticket.get('status')}）",
+        )
+
+    # 3. Pydantic 模型校验
+    try:
+        req = ReviewDecisionRequest(**body)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=422, detail=str(e)) from e
+
+    # 4. 跨字段校验：rewrite 时 rewritten_result 必填
+    if req.decision == ReviewDecision.REWRITE and not req.rewritten_result:
+        raise HTTPException(
+            status_code=400,
+            detail="REWRITE_RESULT_REQUIRED: decision=rewrite 时必须提供 rewritten_result",
+        )
+    # decision_reason 不能为空字符串
+    if not (req.decision_reason or "").strip():
+        raise HTTPException(
+            status_code=400,
+            detail="DECISION_REASON_REQUIRED: decision_reason 不能为空",
+        )
+
+    # 5. 幂等性：已 decided 的工单不允许再次提交
+    db_manager = app.state.db_manager
+    pending = await db_manager.get_pending_review_by_ticket(ticket_id)
+    if pending and pending.get("status") == "decided":
+        raise HTTPException(
+            status_code=409,
+            detail=f"工单 {ticket_id} 的审核单已决策，请勿重复提交",
+        )
+
+    # 6. 恢复工作流
+    result = await resume_from_human_decision(
+        app=app,
+        ticket_id=ticket_id,
+        decision=req.decision.value,
+        decision_reason=req.decision_reason,
+        rewritten_result=req.rewritten_result,
+        reviewer_id=req.reviewer_id,
+    )
+
+    # 7. 广播 review_decided
+    await _broadcast_review_event(
+        "review_decided",
+        ticket_id,
+        {
+            "decision": req.decision.value,
+            "reviewer_id": req.reviewer_id,
+            "next_node": result.get("next_node"),
+        },
+    )
+
+    return {
+        "status": "ok",
+        "ticket_id": ticket_id,
+        "next_node": result.get("next_node"),
+        "workflow_resumed": True,
+    }
 
 
 @router.get("/analytics", response_model=dict)
@@ -650,8 +933,10 @@ async def _run_workflow(app: Any, ticket_id: str, state: dict) -> None:
                         "event": "review_requested",
                         "ticket_id": ticket_id,
                         "status": status,
-                        "trigger_type": current_state.get("trigger_type"),
-                        "trigger_reason": current_state.get("trigger_reason"),
+                        "trigger_type": node_output.get("trigger_type")
+                        or current_state.get("trigger_type"),
+                        "trigger_reason": node_output.get("trigger_reason")
+                        or current_state.get("trigger_reason"),
                     }
                     pending_review = None
                     if hasattr(app.state, "db_manager") and app.state.db_manager:
@@ -671,6 +956,30 @@ async def _run_workflow(app: Any, ticket_id: str, state: dict) -> None:
                         message="工单已转入人工审核",
                         node="human_review_wait",
                         data=review_payload,
+                    )
+                    # 独立的 review_requested 事件（type 字段供前端按事件类型分发）
+                    await _broadcast_review_event(
+                        "review_requested",
+                        ticket_id,
+                        {
+                            "trigger_type": review_payload.get("trigger_type"),
+                            "trigger_reason": review_payload.get("trigger_reason"),
+                            "priority": db_data.get("priority"),
+                            "review_id": review_payload.get("review_id"),
+                        },
+                    )
+
+                # 人工决策已提交事件（resume_from_human_decision 流式处理时触发）
+                if node_output.get("__review_decided__"):
+                    decision_info = node_output.get("__human_decision__") or {}
+                    await _broadcast_review_event(
+                        "review_decided",
+                        ticket_id,
+                        {
+                            "decision": decision_info.get("decision"),
+                            "reviewer_id": decision_info.get("reviewer_id"),
+                            "next_node": node_output.get("__next_node__"),
+                        },
                     )
 
     except Exception as e:
@@ -792,3 +1101,34 @@ async def _broadcast_ticket_update(
         per_ticket.remove(ws)
     if not per_ticket and ticket_id in _ws_connections:
         _ws_connections.pop(ticket_id, None)
+
+
+async def _broadcast_review_event(
+    event_type: str,
+    ticket_id: str,
+    payload: dict[str, Any] | None = None,
+) -> None:
+    """向所有 /ws/monitor 连接广播人工审核事件。
+
+    event_type:
+        - "review_requested": 工单刚转入人工审核
+        - "review_decided": 审核员已提交决策
+    """
+    now = datetime.now()
+    message: dict[str, Any] = {
+        "type": event_type,
+        "ticket_id": ticket_id,
+        "timestamp": now.isoformat(),
+    }
+    if payload:
+        message.update(payload)
+
+    disconnected: list[WebSocket] = []
+    for ws in _global_ws_connections:
+        try:
+            await ws.send_json(message)
+        except Exception:  # noqa: BLE001
+            disconnected.append(ws)
+    for ws in disconnected:
+        if ws in _global_ws_connections:
+            _global_ws_connections.remove(ws)
