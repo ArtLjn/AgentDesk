@@ -51,6 +51,45 @@ _REPORT_PROMPT = """\
 请用简洁的中文输出报告。\
 """
 
+# 人工审核辅助决策提示词
+_SUGGEST_DECISION_PROMPT = """\
+你是工单审核助理。请根据以下信息为人工审核员提供决策建议。
+
+工单 ID：{ticket_id}
+触发类型：{trigger_type}
+触发原因：{trigger_reason}
+AI 处理结果：{processing_result}
+AI 审核评分：{review_score}
+
+请基于以下原则给出建议：
+1. 若 AI 处理结果完整、回应了用户问题、无安全隐患 → 建议approve
+2. 若 AI 结果方向正确但有局部瑕疵 → 建议rewrite并指出问题
+3. 若 AI 结果方向错误或重试超限 → 建议reprocess
+4. 若用户投诉或涉及账户安全且 AI 处理不充分 → 建议reject
+
+严格按以下 JSON 输出：
+{{"recommended_decision": "...", "confidence": 0.0, "reasoning": "...", "key_concerns": ["...", "..."]}}\
+"""
+
+
+def _suggest_decision_fallback(
+    self: "CoordinatorAgent",
+    ticket_id: str,
+    trigger_type: str,
+    trigger_reason: str,
+    processing_result: str | None,
+    review_score: float | None,
+) -> dict:
+    """with_retry 装饰器使用的降级 lambda 替身。
+
+    签名与 _suggest_decision_by_llm 完全一致（含 self），但只透传
+    trigger_type 和 review_score 两个降级所需参数到 fallback_registry。
+    """
+    _ = (self, ticket_id, trigger_reason, processing_result)
+    return fallback_registry.execute(
+        "coordinator.suggest_decision", trigger_type, review_score
+    )
+
 
 class CoordinatorAgent:
     """Supervisor 协调 Agent：全局协调 + 异常兜底。
@@ -367,6 +406,127 @@ class CoordinatorAgent:
             f"失败率: {fail_rate:.1f}%\n"
         )
 
+    async def suggest_decision(
+        self,
+        ticket_id: str,
+        trigger_type: str,
+        trigger_reason: str,
+        processing_result: str | None,
+        review_score: float | None,
+    ) -> dict:
+        """为人工审核生成辅助决策建议。
+
+        重试和降级由 @with_retry 装饰器统一处理。
+
+        Args:
+            ticket_id: 工单 ID
+            trigger_type: 触发类型（escalate/review_failed/error_fallback/user_request）
+            trigger_reason: 触发原因描述
+            processing_result: AI 处理结果文本
+            review_score: AI 审核评分（0.0-1.0）
+
+        Returns:
+            建议字典，包含 recommended_decision / confidence / reasoning / key_concerns
+        """
+        return await self._suggest_decision_by_llm(
+            ticket_id, trigger_type, trigger_reason, processing_result, review_score
+        )
+
+    @with_retry(
+        max_retries=3,
+        backoff_base=2.0,
+        retryable_exceptions=(APIError, APIConnectionError, RateLimitError, RetryableError),
+        fallback=_suggest_decision_fallback,
+    )
+    async def _suggest_decision_by_llm(
+        self,
+        ticket_id: str,
+        trigger_type: str,
+        trigger_reason: str,
+        processing_result: str | None,
+        review_score: float | None,
+    ) -> dict:
+        """通过 LLM 生成人工审核辅助决策。
+
+        由 @with_retry 装饰器统一处理重试和降级逻辑。
+
+        Raises:
+            RetryableError: OpenAI API 可重试错误
+            NonRetryableError: 认证失败或 JSON 解析失败
+        """
+        prompt = _SUGGEST_DECISION_PROMPT.format(
+            ticket_id=ticket_id,
+            trigger_type=trigger_type,
+            trigger_reason=trigger_reason,
+            processing_result=processing_result if processing_result is not None else "无",
+            review_score=review_score if review_score is not None else "无",
+        )
+
+        try:
+            response = await self.client.chat_completions_create(
+                messages=[
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": f"请为工单 {ticket_id} 提供审核建议"},
+                ],
+                temperature=0.2,
+                response_format={"type": "json_object"},
+                task_type=self._task_type,
+            )
+        except AuthenticationError as e:
+            raise NonRetryableError(f"API 认证失败: {e}", cause=e)
+        except (APIError, APIConnectionError, RateLimitError) as e:
+            raise RetryableError(f"API 调用失败: {e}", cause=e)
+
+        raw = response.choices[0].message.content or "{}"
+
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError as e:
+            raise NonRetryableError(f"LLM 返回非法 JSON: {e}", cause=e)
+
+    @staticmethod
+    def _fallback_suggest_decision(
+        trigger_type: str, review_score: float | None = None
+    ) -> dict:
+        """辅助决策降级方案：按触发类型走规则降级。
+
+        Args:
+            trigger_type: 触发类型
+            review_score: AI 审核评分（保留参数以与 LLM 方法签名对齐，本规则不使用）
+
+        Returns:
+            降级建议字典
+        """
+        _ = review_score  # 保留签名对齐，当前规则不使用
+        if trigger_type == "escalate":
+            return {
+                "recommended_decision": "reprocess",
+                "confidence": 0.5,
+                "reasoning": "升级工单默认建议重新处理",
+                "key_concerns": ["需人工确认AI处理方向"],
+            }
+        if trigger_type == "review_failed":
+            return {
+                "recommended_decision": "rewrite",
+                "confidence": 0.6,
+                "reasoning": "AI多次审核未通过，建议人工改写",
+                "key_concerns": ["AI生成结果质量不达标"],
+            }
+        if trigger_type == "error_fallback":
+            return {
+                "recommended_decision": "reprocess",
+                "confidence": 0.4,
+                "reasoning": "工作流异常，建议重新处理",
+                "key_concerns": ["需排查异常原因"],
+            }
+        # user_request
+        return {
+            "recommended_decision": "approve",
+            "confidence": 0.3,
+            "reasoning": "用户主动申请复审，默认建议通过",
+            "key_concerns": ["需人工确认用户诉求"],
+        }
+
     @staticmethod
     def create_from_settings(
         notification_tool: "NotificationTool | None" = None,
@@ -403,3 +563,6 @@ class CoordinatorAgent:
 fallback_registry.register("coordinator.escalate", CoordinatorAgent._fallback_escalate)
 fallback_registry.register("coordinator.handle_failure", CoordinatorAgent._fallback_failure)
 fallback_registry.register("coordinator.generate_report", CoordinatorAgent._fallback_report)
+fallback_registry.register(
+    "coordinator.suggest_decision", CoordinatorAgent._fallback_suggest_decision
+)
