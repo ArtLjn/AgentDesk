@@ -167,6 +167,126 @@ export interface WSMessage {
   timestamp: string
   node?: string
   data?: Record<string, unknown>
+  // 兼容 review_requested / review_decided 事件
+  type?: string
+  trigger_type?: string
+  trigger_reason?: string | null
+  priority?: string | null
+  review_id?: string
+  decision?: string
+  reviewer_id?: string
+  next_node?: string
+}
+
+// 人工审核相关
+export type TriggerType = 'escalate' | 'review_failed' | 'error_fallback' | 'user_request'
+export type ReviewDecision = 'approve' | 'reject' | 'rewrite' | 'reprocess'
+export type ReviewStatus = 'pending' | 'decided'
+
+export interface AISuggestion {
+  recommended_decision: ReviewDecision
+  confidence: number  // 0-1
+  reasoning: string
+  key_concerns: string[]
+}
+
+export interface HumanReview {
+  review_id: string
+  ticket_id: string
+  trigger_type: TriggerType | string
+  trigger_reason: string | null
+  ai_suggestion: AISuggestion | null
+  decision: ReviewDecision | string | null
+  decision_reason: string | null
+  rewritten_result: string | null
+  reviewer_id: string | null
+  status: ReviewStatus
+  created_at: string
+  decided_at: string | null
+}
+
+export interface ReviewQueueItem {
+  review_id: string
+  ticket_id: string
+  trigger_type: TriggerType | string
+  trigger_reason: string | null
+  content_preview: string
+  category: string | null
+  priority: string | null
+  ai_suggestion: AISuggestion | null
+  waiting_seconds: number
+  created_at: string
+}
+
+export interface ReviewDetail {
+  ticket_id: string
+  content: string
+  category: string | null
+  priority: string | null
+  status: string
+  processing_result: string | null
+  review_score: number | null
+  retry_count: number
+  current_review: HumanReview | null
+  history_reviews: HumanReview[]
+  trace_summary: {
+    trace_id: string
+    node_count: number
+    duration: number
+  } | null
+}
+
+export interface ReviewQueueResponse {
+  queue: ReviewQueueItem[]
+  total: number
+  limit: number
+  offset: number
+}
+
+export interface ReviewStats {
+  pending_count: number
+  decided_today: number
+  decision_distribution: {
+    approve: number
+    rewrite: number
+    reprocess: number
+    reject: number
+  }
+  avg_decision_seconds: number
+  ai_adoption_rate: number  // 0-1
+}
+
+export interface ReviewDecisionRequest {
+  decision: ReviewDecision
+  decision_reason: string
+  rewritten_result?: string
+  reviewer_id: string
+}
+
+export interface ReviewDecisionResponse {
+  status: 'ok'
+  ticket_id: string
+  next_node: 'notify' | 'process' | 'complete'
+  workflow_resumed: boolean
+}
+
+export interface ReviewRequestedEvent {
+  type: 'review_requested'
+  ticket_id: string
+  timestamp: string
+  trigger_type: string
+  priority: string | null
+  trigger_reason: string | null
+  review_id: string
+}
+
+export interface ReviewDecidedEvent {
+  type: 'review_decided'
+  ticket_id: string
+  timestamp: string
+  decision: string
+  reviewer_id: string
+  next_node: string
 }
 
 // 系统设置
