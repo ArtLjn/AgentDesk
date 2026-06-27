@@ -37,7 +37,10 @@ export function DecisionPanel({ detail, reviewerId, onReviewerIdChange, onSubmit
   const [rewritten, setRewritten] = useState('')
   const [confirmOpen, setConfirmOpen] = useState(false)
 
-  const isDecided = detail.current_review?.status === 'decided' || detail.status !== 'reviewing'
+  // 工单状态为 pending_human_review 时才允许决策；current_review 已 decided 也禁用
+  const isDecided =
+    detail.current_review?.status === 'decided' ||
+    detail.status !== 'pending_human_review'
 
   const handleClick = (opt: DecisionOption) => {
     setPendingDecision(opt.key)
