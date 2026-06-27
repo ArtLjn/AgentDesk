@@ -69,6 +69,14 @@ review_threshold: 0.7
 checkpoint_ttl: 86400         # 秒，24h
 
 # ---------------------------------------------------------------------------
+# 人工审核工作台
+# ---------------------------------------------------------------------------
+# review_timeout_threshold：审核超时阈值（秒），仅前端"超时"提示用，后端不强制 SLA
+# ai_suggestion_high_confidence_threshold：AI 建议高置信度阈值，前端高亮推荐用
+review_timeout_threshold: 1800
+ai_suggestion_high_confidence_threshold: 0.7
+
+# ---------------------------------------------------------------------------
 # 默认采样温度（仅作记录；各 Agent 仍显式传参，后续可统一接入）
 # ---------------------------------------------------------------------------
 llm_temperature: 0.1
@@ -81,7 +89,12 @@ http_timeout: 30              # 秒
 # ---------------------------------------------------------------------------
 # 数据库 / 存储
 # ---------------------------------------------------------------------------
+# database_url：SQLAlchemy 异步 URL
+#   生产（腾讯云 MySQL）：mysql+aiomysql://user:password@host:port/dbname?charset=utf8mb4
+#   本地/测试（SQLite）：sqlite+aiosqlite:///data/app.db
+# db_path：仅兼容字段，database_url 留空时据此合成 SQLite URL
 db_path: "data/app.db"
+database_url: ""  # 留空时自动走 sqlite+aiosqlite:///{db_path}
 
 # ---------------------------------------------------------------------------
 # 可观测性
