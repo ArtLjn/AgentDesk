@@ -981,16 +981,20 @@ async def resume_from_human_decision(
 
     next_node: str | None = None
     final_status = initial_state.get("status", "processing")
+    # 累积更新：每次迭代基于上一次的状态叠加 node_output，避免后续节点
+    # 未返回某字段时被 initial existing 快照回写覆盖（rewrite 后被旧值覆盖等场景）
+    current_snapshot: dict[str, Any] = dict(existing)
     async for event in subgraph.astream(initial_state):
         for node_name, node_output in event.items():
             if not isinstance(node_output, dict):
                 continue
             next_node = node_name
+            current_snapshot.update(node_output)
             if "status" in node_output:
                 final_status = node_output["status"]
 
             # 同步工单快照到 DB（与 _run_workflow 行为对齐）
-            merged = {**existing, **node_output, "ticket_id": ticket_id}
+            merged = {**current_snapshot, "ticket_id": ticket_id}
             await db_tool.save_ticket(merged)
 
     return {

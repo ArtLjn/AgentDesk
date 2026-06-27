@@ -322,6 +322,12 @@ class TestReviewFailedRewriteFlow:
         # 最终工单 completed
         final = await e2e_app.state.db_tool.get_ticket(ticket_id)
         assert final["status"] == "completed"
+        # 回归断言：ticket.processing_result 必须被 rewritten_result 覆盖
+        # （修复前 bug：resume 循环内 existing 快照未刷新，notify/complete 节点不返回
+        # processing_result 时被旧值回写覆盖）
+        assert "人工改写" in (final.get("processing_result") or ""), (
+            f"processing_result 应含人工改写内容，实际: {final.get('processing_result')!r}"
+        )
 
         # human_reviews 记录已 decided，rewritten_result 已持久化
         reviews = await e2e_app.state.db_manager.list_reviews_by_ticket(ticket_id)
