@@ -10,6 +10,9 @@ venv/
 dist/
 build/
 
+# Config — 本地真实凭据，不入 git；模板见 config.yaml.example
+config.yaml
+
 # IDE
 .vscode/
 .idea/
@@ -31,3 +34,12 @@ qdrant_storage/
 logs/
 *.log
 .worktrees/
+
+# Claude Code 本地工具产物（命令/技能/worktree）
+.claude/commands/
+.claude/skills/
+.claude/worktrees/
+
+# Node 临时产物
+web/.node_modules-trashed
+

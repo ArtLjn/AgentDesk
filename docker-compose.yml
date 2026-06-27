@@ -12,21 +12,22 @@ services:
     build:
       context: .
       args:
-        - PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn
+        - PIP_INDEX_URL=https://pypi.org/simple
     ports:
       - "8001:8000"
     depends_on:
       - qdrant
-    env_file:
-      - .env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
+      # 仅容器内覆盖；默认值来自挂载的 config.yaml
       - QDRANT_URL=http://qdrant:6333
-      - EMBEDDING_BASE_URL=http://host.docker.internal:11434
       - CACHE_ENABLED=true
       - CACHE_MAX_SIZE=512
       - CACHE_TTL=300
     volumes:
       - ./data:/app/data
+      - ./config.yaml:/app/config.yaml:ro
     restart: unless-stopped
 
 volumes:

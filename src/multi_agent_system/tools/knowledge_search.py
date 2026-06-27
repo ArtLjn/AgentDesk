@@ -12,9 +12,10 @@ from src.multi_agent_system.config import Settings
 
 __all__ = ["KnowledgeSearchTool"]
 
-# 文档分块参数
-_CHUNK_SIZE = 512
-_CHUNK_OVERLAP = 64
+# 文档分块参数（默认值，可被 config.yaml 覆盖）
+_settings = Settings()
+_CHUNK_SIZE = _settings.chunk_size
+_CHUNK_OVERLAP = _settings.chunk_overlap
 
 
 class KnowledgeSearchTool:
@@ -38,12 +39,18 @@ class KnowledgeSearchTool:
         embedding_base_url: str,
         embedding_model: str,
         embedding_dim: int,
+        qdrant_api_key: str = "",
+        embedding_api_key: str = "",
     ) -> None:
-        self._client = QdrantClient(url=qdrant_url)
+        client_kwargs: dict[str, Any] = {"url": qdrant_url, "check_compatibility": False}
+        if qdrant_api_key:
+            client_kwargs["api_key"] = qdrant_api_key
+        self._client = QdrantClient(**client_kwargs)
         self._collection_name = collection_name
         self._embedding_base_url = embedding_base_url.rstrip("/")
         self._embedding_model = embedding_model
         self._embedding_dim = embedding_dim
+        self._embedding_api_key = embedding_api_key
 
     def ensure_collection(self) -> None:
         """确保 Qdrant collection 存在，不存在则创建。"""
@@ -63,7 +70,7 @@ class KnowledgeSearchTool:
             logger.debug(f"Qdrant collection 已存在: {self._collection_name}")
 
     def _get_embedding(self, text: str) -> list[float]:
-        """调用 Ollama API 获取文本 embedding。
+        """调用 Google Gemini API 获取文本 embedding。
 
         Args:
             text: 需要编码的文本
@@ -74,13 +81,17 @@ class KnowledgeSearchTool:
         Raises:
             RuntimeError: API 调用失败时抛出
         """
-        url = f"{self._embedding_base_url}/api/embeddings"
-        payload = {"model": self._embedding_model, "prompt": text}
+        url = f"{self._embedding_base_url}/models/{self._embedding_model}:embedContent"
+        headers = {"x-goog-api-key": self._embedding_api_key}
+        payload = {
+            "model": f"models/{self._embedding_model}",
+            "content": {"parts": [{"text": text}]},
+        }
 
         logger.debug(f"🔢 [Embedding] 调用模型: {self._embedding_model}, 服务: {url}")
-        response = requests.post(url, json=payload, timeout=30)
+        response = requests.post(url, json=payload, headers=headers, timeout=_settings.http_timeout)
         response.raise_for_status()
-        embedding = response.json()["embedding"]
+        embedding = response.json()["embedding"]["values"]
         logger.debug(f"🔢 [Embedding] 成功生成向量，维度: {len(embedding)}")
         return embedding
 
@@ -149,8 +160,8 @@ class KnowledgeSearchTool:
             logger.debug(f"文档 {doc_id} 分为 {len(chunks)} 块")
 
         if points:
-            # 分批 upsert，每批最多 100 个点
-            batch_size = 100
+            # 分批 upsert
+            batch_size = _settings.qdrant_batch_size
             for i in range(0, len(points), batch_size):
                 batch = points[i : i + batch_size]
                 self._client.upsert(
@@ -180,14 +191,22 @@ class KnowledgeSearchTool:
         self.ensure_collection()
         query_vector = self._get_embedding(query)
 
-        from qdrant_client.models import ScoredPoint
-
-        results = self._client.search(
-            collection_name=self._collection_name,
-            query_vector=query_vector,
-            limit=top_k,
-            score_threshold=score_threshold,
-        )
+        if hasattr(self._client, "query_points"):
+            response = self._client.query_points(
+                collection_name=self._collection_name,
+                query=query_vector,
+                limit=top_k,
+                score_threshold=score_threshold,
+                with_payload=True,
+            )
+            results = response.points
+        else:
+            results = self._client.search(
+                collection_name=self._collection_name,
+                query_vector=query_vector,
+                limit=top_k,
+                score_threshold=score_threshold,
+            )
 
         matched: list[dict[str, Any]] = []
         for hit in results:
@@ -205,6 +224,65 @@ class KnowledgeSearchTool:
         logger.info(f"查询匹配到 {len(matched)} 条结果")
         return matched
 
+    def list_documents(
+        self,
+        limit: int = 50,
+        offset: int | str | None = None,
+    ) -> dict[str, Any]:
+        """按文档维度列出知识库内容。
+
+        Qdrant 中实际保存的是分块 point，这里根据 document_id 聚合，
+        供管理页面查看已上传文档和完整内容。
+        """
+        self.ensure_collection()
+        records, next_offset = self._client.scroll(
+            collection_name=self._collection_name,
+            limit=limit,
+            offset=offset,
+            with_payload=True,
+            with_vectors=False,
+        )
+
+        grouped: dict[str, dict[str, Any]] = {}
+        for record in records:
+            payload = record.payload or {}
+            doc_id = str(payload.get("document_id") or record.id)
+            doc = grouped.setdefault(
+                doc_id,
+                {
+                    "id": doc_id,
+                    "title": payload.get("title") or "未命名文档",
+                    "category": payload.get("category") or "未分类",
+                    "source": payload.get("source") or "",
+                    "chunk_count": 0,
+                    "_chunks": [],
+                },
+            )
+            doc["chunk_count"] += 1
+            doc["_chunks"].append(
+                {
+                    "index": payload.get("chunk_index", 0),
+                    "content": payload.get("content", ""),
+                    "point_id": str(record.id),
+                }
+            )
+
+        documents: list[dict[str, Any]] = []
+        for doc in grouped.values():
+            chunks = sorted(doc.pop("_chunks"), key=lambda item: item["index"])
+            content = "\n".join(chunk["content"] for chunk in chunks if chunk["content"])
+            doc["content"] = content
+            doc["preview"] = content[:180]
+            doc["chunks"] = chunks
+            documents.append(doc)
+
+        documents.sort(key=lambda item: item["title"])
+        return {
+            "documents": documents,
+            "count": len(documents),
+            "next_offset": str(next_offset) if next_offset is not None else None,
+        }
+
     @staticmethod
     def create_from_settings() -> "KnowledgeSearchTool":
         """从 Settings 配置创建 KnowledgeSearchTool 实例。
@@ -219,4 +297,6 @@ class KnowledgeSearchTool:
             embedding_base_url=settings.embedding_base_url,
             embedding_model=settings.embedding_model,
             embedding_dim=settings.embedding_dim,
+            qdrant_api_key=settings.qdrant_api_key,
+            embedding_api_key=settings.embedding_api_key,
         )

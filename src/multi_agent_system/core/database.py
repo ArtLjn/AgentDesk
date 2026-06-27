@@ -695,6 +695,149 @@ class DatabaseManager:
             "by_trigger": by_trigger,
         }
 
+    async def list_pending_reviews_with_tickets(
+        self,
+        trigger_type: str | None = None,
+        category: str | None = None,
+        priority: str | None = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """联表查询 pending 审核单 + 工单快照，供审核工作台队列展示。
+
+        支持按 trigger_type / category / priority 过滤；priority 排序遵循
+        P0 > P1 > P2 > P3（自定义 CASE 排序）。
+        """
+        query = (
+            "SELECT hr.*, tk.content AS ticket_content, "
+            "tk.category AS ticket_category, tk.priority AS ticket_priority "
+            "FROM human_reviews hr "
+            "LEFT JOIN tickets tk ON hr.ticket_id = tk.ticket_id "
+            "WHERE hr.status = 'pending'"
+        )
+        params: list[Any] = []
+        if trigger_type:
+            query += " AND hr.trigger_type = ?"
+            params.append(trigger_type)
+        if category:
+            query += " AND tk.category = ?"
+            params.append(category)
+        if priority:
+            query += " AND tk.priority = ?"
+            params.append(priority)
+        # 排序：优先级 P0>P1>P2>P3，其次 waiting_seconds 降序（created_at 升序）
+        query += (
+            " ORDER BY CASE tk.priority WHEN 'P0' THEN 0 WHEN 'P1' THEN 1 "
+            "WHEN 'P2' THEN 2 WHEN 'P3' THEN 3 ELSE 9 END ASC, "
+            "hr.created_at ASC LIMIT ? OFFSET ?"
+        )
+        params.extend([limit, offset])
+        async with self.connection() as conn:
+            cursor = await conn.execute(query, params)
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    async def count_pending_reviews(
+        self,
+        trigger_type: str | None = None,
+        category: str | None = None,
+        priority: str | None = None,
+    ) -> int:
+        """统计符合筛选条件的 pending 审核单总数（用于分页）。"""
+        query = (
+            "SELECT COUNT(*) AS cnt FROM human_reviews hr "
+            "LEFT JOIN tickets tk ON hr.ticket_id = tk.ticket_id "
+            "WHERE hr.status = 'pending'"
+        )
+        params: list[Any] = []
+        if trigger_type:
+            query += " AND hr.trigger_type = ?"
+            params.append(trigger_type)
+        if category:
+            query += " AND tk.category = ?"
+            params.append(category)
+        if priority:
+            query += " AND tk.priority = ?"
+            params.append(priority)
+        async with self.connection() as conn:
+            cursor = await conn.execute(query, params)
+            row = await cursor.fetchone()
+            return int(row["cnt"]) if row else 0
+
+    async def get_review_workbench_stats(self) -> dict[str, Any]:
+        """审核工作台统计：待处理数、今日已决策数、决策分布、平均决策时长、AI 采纳率。"""
+        from datetime import date
+
+        today_start = f"{date.today().isoformat()}T00:00:00"
+
+        async with self.connection() as conn:
+            cursor = await conn.execute(
+                "SELECT COUNT(*) AS cnt FROM human_reviews WHERE status = 'pending'"
+            )
+            pending_count = int((await cursor.fetchone())["cnt"])
+
+            cursor = await conn.execute(
+                "SELECT COUNT(*) AS cnt FROM human_reviews "
+                "WHERE status = 'decided' AND decided_at >= ?",
+                (today_start,),
+            )
+            decided_today = int((await cursor.fetchone())["cnt"])
+
+            cursor = await conn.execute(
+                "SELECT decision, COUNT(*) AS cnt FROM human_reviews "
+                "WHERE status = 'decided' AND decision IS NOT NULL "
+                "GROUP BY decision"
+            )
+            decision_distribution = {
+                row["decision"]: int(row["cnt"]) for row in await cursor.fetchall()
+            }
+
+            cursor = await conn.execute(
+                "SELECT AVG("
+                "(julianday(decided_at) - julianday(created_at)) * 86400"
+                ") AS avg_sec FROM human_reviews "
+                "WHERE status = 'decided' AND decided_at IS NOT NULL"
+            )
+            avg_row = await cursor.fetchone()
+            avg_decision_seconds = (
+                int(avg_row["avg_sec"]) if avg_row and avg_row["avg_sec"] else 0
+            )
+
+            # AI 采纳率：decided 行中 decision == ai_suggestion.recommended_decision
+            cursor = await conn.execute(
+                "SELECT decision, ai_suggestion FROM human_reviews "
+                "WHERE status = 'decided' AND decision IS NOT NULL "
+                "AND ai_suggestion IS NOT NULL"
+            )
+            adopted = 0
+            comparable = 0
+            for row in await cursor.fetchall():
+                try:
+                    suggestion = json.loads(row["ai_suggestion"])
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                recommended = (
+                    suggestion.get("recommended_decision")
+                    if isinstance(suggestion, dict)
+                    else None
+                )
+                if not recommended:
+                    continue
+                comparable += 1
+                if row["decision"] == recommended:
+                    adopted += 1
+            ai_adoption_rate = (
+                round(adopted / comparable, 4) if comparable > 0 else 0.0
+            )
+
+        return {
+            "pending_count": pending_count,
+            "decided_today": decided_today,
+            "decision_distribution": decision_distribution,
+            "avg_decision_seconds": avg_decision_seconds,
+            "ai_adoption_rate": ai_adoption_rate,
+        }
+
     # Analytics
     async def get_category_distribution(self) -> dict[str, int]:
         """统计各分类的工单数量分布。"""

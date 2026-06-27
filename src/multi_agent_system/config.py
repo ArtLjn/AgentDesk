@@ -1,6 +1,19 @@
-"""全局配置模块，基于 Pydantic Settings 从环境变量和 .env 文件加载配置。"""
+"""全局配置模块。
 
-from pydantic_settings import BaseSettings, SettingsConfigDict
+加载优先级（高 → 低）：
+    环境变量  >  config.yaml  >  字段默认值
+
+config.yaml 是项目配置的「单一真相源」，把所有可调参数和凭据集中管理；
+该文件不入 git，模板见 config.yaml.example。
+如需在容器或不同部署环境中覆盖个别字段，可设置同名环境变量（大写）。
+"""
+
+from pydantic_settings import (
+    BaseSettings,
+    PydanticBaseSettingsSource,
+    SettingsConfigDict,
+    YamlConfigSettingsSource,
+)
 
 __all__ = ["Settings"]
 
@@ -8,34 +21,46 @@ __all__ = ["Settings"]
 class Settings(BaseSettings):
     """多 Agent 工单处理系统统一配置。
 
-    所有字段均可通过同名环境变量或 .env 文件覆盖。
+    所有字段均可通过 config.yaml 或同名环境变量（大写）覆盖。
+    字段名与 config.yaml 中的键一一对应（扁平结构）。
     """
 
     # LLM (Chat) — 默认 Ollama Cloud，Embedding — HomeUbuntu 本地
     llm_base_url: str = "https://ollama.com/v1"
     llm_api_key: str = "ollama"
-    embedding_base_url: str = "http://172.16.58.68:11434"
+    llm_model: str = "gemma3:12b"
+    llm_temperature: float = 0.1
+
+    embedding_base_url: str = "https://generativelanguage.googleapis.com/v1beta"
+    embedding_api_key: str = ""
+    embedding_model: str = "gemini-embedding-001"
+    embedding_dim: int = 3072
 
     # Qdrant 向量数据库配置
     qdrant_url: str = "http://qdrant:6333"
+    qdrant_api_key: str = ""  # 留空则不启用 auth；真实 key 放 .env，不入 git
     qdrant_collection: str = "knowledge_base"
+    qdrant_batch_size: int = 100
+    qdrant_top_k: int = 3
+    qdrant_score_threshold: float = 0.5
 
-    # LLM 模型配置
-    llm_model: str = "gemma3:12b"
-    embedding_model: str = "qwen3-embedding:4b"
-    embedding_dim: int = 2560
+    # 文档分块（RAG ingestion）
+    chunk_size: int = 512
+    chunk_overlap: int = 64
 
     # 缓存配置
     cache_enabled: bool = True
     cache_max_size: int = 512
     cache_ttl: int = 300  # 秒
 
+    # 上下文管理
+    context_max_messages: int = 20
+    context_summary_max_tokens: int = 200
+
     # 处理策略
     max_retries: int = 3
+    retry_backoff_base: float = 2.0
     review_threshold: float = 0.7
-
-    # 上下文管理
-    max_messages: int = 20
     checkpoint_ttl: int = 86400  # 24 hours in seconds
 
     # ReAct 配置
@@ -54,12 +79,47 @@ class Settings(BaseSettings):
     }
     fallback_model: str = "gemma3:12b"
 
+    # HTTP 客户端默认超时（秒）
+    http_timeout: int = 30
+
+    # 数据库
+    db_path: str = "data/app.db"
+
+    # 可观测性
+    trace_max_history: int = 1000
+
     # API 服务配置
     api_host: str = "0.0.0.0"
-    api_port: int = 8000
+    api_port: int = 9001
+
+    # 鉴权配置
+    auth_enabled: bool = True
+    auth_username: str = "admin"
+    auth_password_hash: str = ""
+    auth_session_secret: str = "change-me-to-a-random-32-char-string-please"
 
     model_config = SettingsConfigDict(
-        env_file=".env",
-        env_file_encoding="utf-8",
+        yaml_file="config.yaml",
+        yaml_file_encoding="utf-8",
         extra="ignore",
     )
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        """优先级：构造参数 > 环境变量 > config.yaml > 字段默认值。
+
+        dotenv_settings 保留参数签名兼容，未启用 .env 加载。
+        """
+        return (
+            init_settings,
+            env_settings,
+            YamlConfigSettingsSource(settings_cls),
+            file_secret_settings,
+        )
