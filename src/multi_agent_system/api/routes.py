@@ -30,6 +30,49 @@ _ws_connections: dict[str, list[WebSocket]] = {}
 _global_ws_connections: list[WebSocket] = []
 
 
+def _parse_references(ticket: dict[str, Any]) -> list[str]:
+    """从数据库记录中解析知识库引用列表。"""
+    raw = ticket.get("references_json")
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [str(item) for item in parsed]
+
+
+def _parse_trace_references(trace: dict[str, Any]) -> list[str]:
+    """从 trace 关联的工单字段中解析知识库引用。"""
+    raw = trace.get("ticket_references_json")
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [str(item) for item in parsed]
+
+
+def _enrich_trace(trace: dict[str, Any]) -> dict[str, Any]:
+    """补充 trace 的业务上下文字段，便于前端展示处理价值。"""
+    enriched = dict(trace)
+    references = _parse_trace_references(trace)
+    enriched["ticket_summary"] = trace.get("ticket_content")
+    enriched["ticket_category"] = trace.get("ticket_category")
+    enriched["ticket_priority"] = trace.get("ticket_priority")
+    enriched["ticket_result"] = trace.get("ticket_result")
+    enriched["ticket_review_score"] = trace.get("ticket_review_score")
+    enriched["reference_count"] = len(references)
+    enriched["references"] = references
+    enriched.pop("ticket_references_json", None)
+    return enriched
+
+
 # ============================================================
 # 工单接口
 # ============================================================
@@ -123,6 +166,7 @@ async def get_ticket(ticket_id: str, request: Request) -> TicketResponse:
         category=ticket.get("category"),
         priority=ticket.get("priority"),
         processing_result=ticket.get("processing_result"),
+        references=_parse_references(ticket),
         review_score=ticket.get("review_score"),
         retry_count=ticket.get("retry_count", 0),
         status=ticket.get("status", "received"),
@@ -152,6 +196,7 @@ async def list_tickets(
             category=t.get("category"),
             priority=t.get("priority"),
             processing_result=t.get("processing_result"),
+            references=_parse_references(t),
             review_score=t.get("review_score"),
             retry_count=t.get("retry_count", 0),
             status=t.get("status", "received"),
@@ -165,6 +210,31 @@ async def list_tickets(
 # ============================================================
 # 知识库接口
 # ============================================================
+
+
+@router.get("/knowledge", response_model=dict)
+async def list_knowledge(
+    request: Request,
+    limit: int = Query(default=50, ge=1, le=200, description="最多读取的分块数量"),
+    offset: str | None = Query(default=None, description="Qdrant scroll 偏移量"),
+) -> dict:
+    """查看知识库中已有文档列表和内容。"""
+    knowledge_tool = request.app.state.knowledge_tool
+
+    if knowledge_tool is None:
+        raise HTTPException(
+            status_code=503,
+            detail="知识库服务不可用（Qdrant 未连接）",
+        )
+
+    try:
+        return knowledge_tool.list_documents(limit=limit, offset=offset)
+    except Exception as e:
+        logger.error(f"知识库文档列表读取失败: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"知识库文档列表读取失败: {e}",
+        ) from e
 
 
 @router.post("/knowledge", response_model=dict)
@@ -219,6 +289,38 @@ async def upload_knowledge(
 # ============================================================
 # 统计接口
 # ============================================================
+
+
+@router.get("/settings", response_model=dict)
+async def get_system_settings(request: Request) -> dict:
+    """获取前端设置页展示用的只读配置摘要。"""
+    settings = request.app.state.settings
+    knowledge_tool = request.app.state.knowledge_tool
+
+    return {
+        "llm_base_url": settings.llm_base_url,
+        "llm_api_key_configured": bool(settings.llm_api_key),
+        "llm_model": settings.llm_model,
+        "embedding_base_url": settings.embedding_base_url,
+        "embedding_model": settings.embedding_model,
+        "embedding_dim": settings.embedding_dim,
+        "qdrant_url": settings.qdrant_url,
+        "qdrant_collection": settings.qdrant_collection,
+        "knowledge_available": knowledge_tool is not None,
+        "cache_enabled": settings.cache_enabled,
+        "cache_max_size": settings.cache_max_size,
+        "cache_ttl": settings.cache_ttl,
+        "max_retries": settings.max_retries,
+        "review_threshold": settings.review_threshold,
+        "max_messages": settings.max_messages,
+        "checkpoint_ttl": settings.checkpoint_ttl,
+        "max_react_iterations": settings.max_react_iterations,
+        "max_concurrency": settings.max_concurrency,
+        "model_routes": settings.model_routes,
+        "fallback_model": settings.fallback_model,
+        "api_host": settings.api_host,
+        "api_port": settings.api_port,
+    }
 
 
 @router.post("/tickets/{ticket_id}/feedback", response_model=dict)
@@ -283,6 +385,13 @@ async def get_ticket_trace(ticket_id: str, request: Request) -> dict:
         "node_count": trace.get("node_count", 0),
         "start_time": trace.get("start_time"),
         "end_time": trace.get("end_time"),
+        "ticket_summary": trace.get("ticket_content"),
+        "ticket_category": trace.get("ticket_category"),
+        "ticket_priority": trace.get("ticket_priority"),
+        "ticket_result": trace.get("ticket_result"),
+        "ticket_review_score": trace.get("ticket_review_score"),
+        "reference_count": len(_parse_trace_references(trace)),
+        "references": _parse_trace_references(trace),
         "spans": span_tree,
     }
 
@@ -298,7 +407,14 @@ async def list_traces(
     limit = min(limit, 100)
     db_manager = request.app.state.db_manager
     traces = await db_manager.list_traces(status=status, limit=limit, offset=offset)
-    return {"traces": traces, "count": len(traces)}
+    total = await db_manager.count_traces(status=status)
+    return {
+        "traces": [_enrich_trace(trace) for trace in traces],
+        "count": len(traces),
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    }
 
 
 @router.get("/traces/{trace_id}/stats")
@@ -398,6 +514,58 @@ _NODE_LABELS: dict[str, str] = {
 }
 
 
+async def _fallback_to_human_review(
+    app: Any,
+    ticket_id: str,
+    state: dict,
+    existing: dict,
+    error_msg: str,
+) -> None:
+    """异常兜底：写入 error_fallback 类型人工审核单并更新工单状态。
+
+    复用 human_review_wait 节点逻辑，但 trigger_type 固定为 error_fallback。
+    """
+    from datetime import datetime
+
+    from src.multi_agent_system.core.logging import generate_trace_id
+
+    db_manager = app.state.db_manager
+    coordinator = getattr(app.state, "coordinator", None)
+
+    # 更新工单状态为 pending_human_review
+    await app.state.db_tool.save_ticket({
+        **existing,
+        "ticket_id": ticket_id,
+        "status": "pending_human_review",
+        "error": error_msg,
+    })
+
+    # 生成 AI 建议（可选，失败不阻塞）
+    ai_suggestion = None
+    if coordinator is not None:
+        try:
+            ai_suggestion = await coordinator.suggest_decision(
+                ticket_id,
+                "error_fallback",
+                error_msg,
+                state.get("processing_result"),
+                state.get("review_score"),
+            )
+        except Exception as ai_err:  # noqa: BLE001
+            logger.warning(f"error_fallback AI 建议失败: {ai_err}")
+
+    # 写入 pending 审核单
+    if db_manager is not None:
+        await db_manager.create_pending_review({
+            "review_id": f"HR-{generate_trace_id()}",
+            "ticket_id": ticket_id,
+            "trigger_type": "error_fallback",
+            "trigger_reason": error_msg,
+            "ai_suggestion": ai_suggestion,
+            "created_at": datetime.now().isoformat(),
+        })
+
+
 async def _run_workflow(app: Any, ticket_id: str, state: dict) -> None:
     """后台执行工作流，每个节点完成后实时推送状态更新。"""
     workflow = app.state.workflow
@@ -434,6 +602,8 @@ async def _run_workflow(app: Any, ticket_id: str, state: dict) -> None:
                     "status": current_state.get("status", current_state.get("status", "processing")),
                     "error": current_state.get("error"),
                 }
+                if "references" in node_output:
+                    db_data["references"] = node_output.get("references", [])
                 await db_tool.save_ticket(db_data)
 
                 status = db_data.get("status", "processing")
@@ -474,22 +644,51 @@ async def _run_workflow(app: Any, ticket_id: str, state: dict) -> None:
                     data=span_data,
                 )
 
+                # 人工审核请求事件：节点标记 __review_requested__ 时广播
+                if node_output.get("__review_requested__"):
+                    review_payload: dict[str, Any] = {
+                        "event": "review_requested",
+                        "ticket_id": ticket_id,
+                        "status": status,
+                        "trigger_type": current_state.get("trigger_type"),
+                        "trigger_reason": current_state.get("trigger_reason"),
+                    }
+                    pending_review = None
+                    if hasattr(app.state, "db_manager") and app.state.db_manager:
+                        pending_review = (
+                            await app.state.db_manager.get_pending_review_by_ticket(
+                                ticket_id
+                            )
+                        )
+                    if pending_review:
+                        review_payload["review_id"] = pending_review.get("review_id")
+                        review_payload["ai_suggestion"] = pending_review.get(
+                            "ai_suggestion"
+                        )
+                    await _broadcast_ticket_update(
+                        ticket_id=ticket_id,
+                        status=status,
+                        message="工单已转入人工审核",
+                        node="human_review_wait",
+                        data=review_payload,
+                    )
+
     except Exception as e:
         logger.error(f"工单处理异常: {ticket_id}, 错误: {e}")
 
         existing = await db_tool.get_ticket(ticket_id) or {}
-        await db_tool.save_ticket({
-            **existing,
-            "ticket_id": ticket_id,
-            "status": "failed",
-            "error": str(e),
-        })
+
+        # 异常兜底：转为 error_fallback 类型人工审核，而非直接 failed
+        await _fallback_to_human_review(
+            app, ticket_id, current_state, existing, str(e)
+        )
 
         await _broadcast_ticket_update(
             ticket_id=ticket_id,
-            status="failed",
-            message=f"处理失败: {e}",
-            node="error",
+            status="pending_human_review",
+            message=f"处理异常，已转人工审核: {e}",
+            node="human_review_wait",
+            data={"trigger_type": "error_fallback"},
         )
 
 

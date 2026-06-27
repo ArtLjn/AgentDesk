@@ -5,10 +5,11 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.responses import HTMLResponse, FileResponse, Response
 from loguru import logger
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.middleware.sessions import SessionMiddleware
 from starlette.requests import Request
 from starlette.staticfiles import StaticFiles
 
@@ -16,10 +17,13 @@ from src.multi_agent_system.agents.classifier import ClassifierAgent
 from src.multi_agent_system.agents.coordinator import CoordinatorAgent
 from src.multi_agent_system.agents.processor import ReActProcessorAgent
 from src.multi_agent_system.agents.reviewer import ReviewerAgent
+from src.multi_agent_system.api.auth_routes import router as auth_router
 from src.multi_agent_system.config import Settings
+from src.multi_agent_system.core.auth import require_login
 from src.multi_agent_system.tools.analytics import AnalyticsTool
 from src.multi_agent_system.tools.db_query import DBQueryTool
 from src.multi_agent_system.tools.knowledge_search import KnowledgeSearchTool
+from src.multi_agent_system.tools.knowledge_tool_adapter import register_knowledge_tool
 from src.multi_agent_system.tools.notification import NotificationTool
 from src.multi_agent_system.workflow.graph import build_ticket_graph
 
@@ -51,6 +55,7 @@ async def lifespan(app: FastAPI):
         knowledge_tool.ensure_collection()
         logger.info("知识库工具初始化成功")
     except Exception as e:
+        knowledge_tool = None
         logger.warning(f"知识库工具初始化失败（不影响核心功能）: {e}")
 
     # Initialize memory manager
@@ -67,8 +72,7 @@ async def lifespan(app: FastAPI):
     from src.multi_agent_system.core.tool_base import ToolRegistry
 
     tool_registry = ToolRegistry()
-    # Register tools that support ToolBase
-    # (KnowledgeSearchTool and NotificationTool need to be refactored to inherit ToolBase)
+    register_knowledge_tool(tool_registry, knowledge_tool)
 
     # Initialize Agents
     classifier = ClassifierAgent.create_from_settings()
@@ -87,8 +91,14 @@ async def lifespan(app: FastAPI):
         "classifier": classifier,
         "processor": processor,
         "reviewer": reviewer,
+        "coordinator": coordinator,
     }
-    workflow = build_ticket_graph(settings=settings, agents=agents, trace_manager=trace_manager)
+    workflow = build_ticket_graph(
+        settings=settings,
+        agents=agents,
+        trace_manager=trace_manager,
+        db_manager=db_manager,
+    )
 
     # Store in app state
     app.state.settings = settings
@@ -213,10 +223,24 @@ class _CORSAllowAll:
 
 app.add_middleware(_CORSAllowAll)
 
-# 注册路由
+# Session 中间件（cookie-based，签名用 auth_session_secret）
+_settings_for_mw = Settings()
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=_settings_for_mw.auth_session_secret,
+    session_cookie="agentdesk_session",
+    max_age=86400 * 7,  # 7 天
+    same_site="lax",
+    https_only=True,
+)
+
+# 鉴权路由（公开：login/logout/me）
+app.include_router(auth_router, prefix="/api")
+
+# 业务路由（全部要求登录，auth_enabled=false 时自动放行）
 from src.multi_agent_system.api.routes import router  # noqa: E402
 
-app.include_router(router, prefix="/api")
+app.include_router(router, prefix="/api", dependencies=[Depends(require_login)])
 
 
 @app.get("/health")
