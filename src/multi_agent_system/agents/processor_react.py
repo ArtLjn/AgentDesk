@@ -143,6 +143,11 @@ class ReActProcessorAgent:
         memory: MemoryManager | None = None,
     ) -> dict:
         """通过 ReAct 循环处理工单。"""
+        references: list[str] = []
+        knowledge_context = await self._prefetch_knowledge(content, category)
+        if knowledge_context:
+            references.append(knowledge_context)
+            context = f"{context}\n知识库预检索结果:\n{knowledge_context}".strip()
 
         # Build ticket info
         ticket_info = f"内容: {content}\n分类: {category}\n优先级: {priority}"
@@ -218,7 +223,7 @@ class ReActProcessorAgent:
                     iter_span.set_output({"final_answer": True, "iterations": iteration + 1})
                     return {
                         "result": answer,
-                        "references": [],
+                        "references": references,
                     }
 
                 # Try to parse as direct JSON result (backward compat)
@@ -227,9 +232,13 @@ class ReActProcessorAgent:
                         parsed = parse_json_response(raw)
                         if "result" in parsed:
                             iter_span.set_output({"json_result": True})
+                            merged_references = self._merge_references(
+                                references,
+                                parsed.get("references", []),
+                            )
                             return {
                                 "result": parsed.get("result", ""),
-                                "references": parsed.get("references", []),
+                                "references": merged_references,
                             }
                     except json.JSONDecodeError:
                         pass
@@ -253,6 +262,8 @@ class ReActProcessorAgent:
                     async with tool_span:
                         observation = await self._execute_tool(tool_name, params)
                         tool_span.set_output({"observation_length": len(str(observation))})
+                    if tool_name == "search_knowledge" and observation:
+                        references.append(str(observation))
 
                     if memory:
                         memory.add_observation(str(observation), iteration)
@@ -277,8 +288,33 @@ class ReActProcessorAgent:
         logger.warning(f"[ReAct] Max iterations ({self._max_iterations}) reached")
         return {
             "result": "问题较复杂，已尝试多次推理仍未解决，建议升级至人工处理。",
-            "references": [],
+            "references": references,
         }
+
+    async def _prefetch_knowledge(self, content: str, category: str) -> str:
+        """技术和账务类工单先做一次知识库检索，保证 RAG 稳定进入上下文。"""
+        if category not in {"technical", "billing"}:
+            return ""
+        if not self._tool_registry or "search_knowledge" not in self._tool_registry:
+            return ""
+        return await self._execute_tool(
+            "search_knowledge",
+            {"query": content, "top_k": 3, "score_threshold": 0.5},
+        )
+
+    def _merge_references(self, *groups: object) -> list[str]:
+        """合并工具和模型返回的引用，保留顺序并去重。"""
+        merged: list[str] = []
+        seen: set[str] = set()
+        for group in groups:
+            if not isinstance(group, list):
+                continue
+            for item in group:
+                value = str(item)
+                if value and value not in seen:
+                    merged.append(value)
+                    seen.add(value)
+        return merged
 
     def _extract_thought(self, text: str) -> str:
         """从响应中提取 Thought。"""

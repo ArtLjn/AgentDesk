@@ -8,10 +8,10 @@ import os
 from dotenv import load_dotenv
 from loguru import logger
 
-from src.basic_agents.react_agent import _sanitize_text
 from src.rag_systems.personal_knowledge_base.document_processor import (
     DocumentProcessor,
 )
+from src.rag_systems.personal_knowledge_base.text_utils import sanitize_text
 from src.rag_systems.personal_knowledge_base.vector_store import VectorStore
 
 load_dotenv()
@@ -72,7 +72,7 @@ class RAGPipeline:
         Returns:
             包含answer和sources的字典
         """
-        question = _sanitize_text(question)
+        question = sanitize_text(question)
         # 1. 检索相关文档
         results = self.vector_store.search(question, top_k=self.top_k)
 

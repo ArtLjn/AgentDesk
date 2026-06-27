@@ -612,11 +612,10 @@ async def human_review_wait(state: TicketState) -> dict:
                 "created_at": created_at,
             })
 
-        # 3. 创建 pending span
-        # TODO(phase-3): span_type 暂用 "node"，待 core/trace.py 支持 "human_decision" 类型后替换
+        # 3. 创建 pending span（span_type=human_decision，不计入 node_count）
         async with _span(
             "human_review_wait",
-            span_type="node",
+            span_type="human_decision",
             input_data={
                 "trigger_type": trigger_type,
                 "trigger_reason": trigger_reason,
@@ -759,10 +758,10 @@ async def _persist_review_decision(
         },
     )
 
-    # TODO(phase-3): span_type 暂用 "node"，待 core/trace.py 支持 "human_decision" 类型后替换
+    # 写入 decided span（span_type=human_decision，包含 decision/reviewer_id/ai_adopted）
     async with _span(
         "apply_human_decision",
-        span_type="node",
+        span_type="human_decision",
         input_data={"review_id": pending["review_id"], "decision": decision},
     ) as span:
         span.set_output({
