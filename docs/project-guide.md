@@ -2,13 +2,14 @@
 
 ## 项目概述
 
-这是一个**AI Agent 开发工程师学习实战项目**，包含三个梯度：
+这是一个从 **AI Agent 学习项目** 整理而来的毕业设计项目。当前毕业设计主线聚焦于第 3 层：基于多智能体协同的智能工单处理系统。
 
-1. **基础 Agent**（`src/basic_agents/`）：ReAct、Plan-Execute、Reflexion 模式
-2. **RAG 系统**（`src/rag_systems/`）：个人知识库、论文阅读助手
-3. **企业级多 Agent 系统**（`src/multi_agent_system/`）：基于 LangGraph 的工单处理服务
+历史学习产物已归档到 `archive/learning/`，包括 ReAct、Plan-Execute、Reflection、论文阅读助手和文档处理工作流等示例。主源码目录保留：
 
-本文档重点分析第 3 层——完整的工单处理系统。
+1. **多 Agent 工单系统**（`src/multi_agent_system/`）：基于 LangGraph 的工单处理服务
+2. **RAG 辅助模块**（`src/rag_systems/`）：个人知识库相关能力，可作为工单知识库设计参考
+
+本文档重点分析完整的工单处理系统。
 
 ---
 
