@@ -1,14 +1,32 @@
-import { useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
+import { api } from '@/lib/api'
 import { useTraces } from '@/hooks/useApi'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import type { Span, Trace, TraceDetail } from '@/types'
+import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
+import { Input } from '@/components/ui/input'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Skeleton } from '@/components/ui/skeleton'
 import {
-  Activity, RefreshCw, Clock, Cpu, Bot, Wrench, Zap, ArrowDownUp,
-  ChevronRight, ChevronDown, FileJson, ArrowRightLeft, Info,
+  Activity, RefreshCw, Cpu, Bot, Wrench, Zap, FileJson, Search,
+  ArrowRightLeft, Info, X, AlertCircle, Copy, ChevronDown, ChevronUp,
+  ChevronLeft, ChevronRight, BookOpen, CheckCircle2, Tag,
 } from 'lucide-react'
+
+type TimelineNode = Span & {
+  depth: number
+  roundIndex: number
+}
+
+type TimelineRound = {
+  index: number
+  title: string
+  nodes: TimelineNode[]
+  duration: number
+  success: number
+  error: number
+}
 
 const traceStatusStyles: Record<string, string> = {
   running: 'bg-primary/15 text-primary',
@@ -16,265 +34,836 @@ const traceStatusStyles: Record<string, string> = {
   failed: 'bg-destructive/15 text-destructive',
 }
 
-const spanStatusDot: Record<string, string> = {
-  ok: 'bg-success',
-  error: 'bg-destructive',
-  fallback: 'bg-warning',
+const spanStatusStyles: Record<string, string> = {
+  ok: 'bg-success/15 text-success',
+  error: 'bg-destructive/15 text-destructive',
+  fallback: 'bg-warning/15 text-warning',
 }
 
+const nodeTypeColors: Record<string, string> = {
+  node: 'bg-orange-400',
+  react_iter: 'bg-sky-500',
+  llm_call: 'bg-violet-500',
+  tool_call: 'bg-lime-500',
+}
+
+const nodeTypeLabels: Record<string, string> = {
+  node: '工作流节点',
+  react_iter: 'ReAct 推理',
+  llm_call: 'LLM 调用',
+  tool_call: '工具调用',
+}
+
+const nodeTypeIcons: Record<string, typeof Cpu> = {
+  node: Cpu,
+  react_iter: Bot,
+  llm_call: Zap,
+  tool_call: Wrench,
+}
+
+const categoryLabels: Record<string, string> = {
+  technical: '技术问题',
+  billing: '计费退款',
+  complaint: '投诉建议',
+  inquiry: '咨询问答',
+}
+
+const PAGE_SIZE_OPTIONS = [5, 10, 20]
+
 export function AgentMonitor() {
-  const [selectedTraceId, setSelectedTraceId] = useState<string>('')
-  const { data: tracesData, isLoading, refetch } = useTraces()
-  const [selectedTraceDetail, setSelectedTraceDetail] = useState<any>(null)
+  const [filters, setFilters] = useState({ trace: '', ticket: '', status: '' })
+  const [page, setPage] = useState(0)
+  const [pageSize, setPageSize] = useState(5)
+  const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set())
+  const [details, setDetails] = useState<Record<string, TraceDetail>>({})
+  const [loadingIds, setLoadingIds] = useState<Set<string>>(new Set())
+  const [selectedSpan, setSelectedSpan] = useState<Span | null>(null)
+  const traceParams = useMemo(() => {
+    const params: Record<string, string> = {
+      limit: String(pageSize),
+      offset: String(page * pageSize),
+    }
+    if (filters.status.trim()) {
+      params.status = filters.status.trim()
+    }
+    return params
+  }, [page, pageSize, filters.status])
+  const { data: tracesData, isLoading, refetch } = useTraces(traceParams)
 
-  const traces = tracesData?.traces || []
+  const traces = (tracesData?.traces || []) as Trace[]
+  const total = Number((tracesData as { total?: number } | undefined)?.total ?? traces.length)
+  const totalPages = Math.max(Math.ceil(total / pageSize), 1)
+  const pageTraces = traces
+  const filteredTraces = useMemo(() => {
+    return pageTraces.filter((trace) => {
+      const traceMatched = !filters.trace.trim() || trace.trace_id.includes(filters.trace.trim())
+      const ticketMatched = !filters.ticket.trim() || trace.ticket_id.includes(filters.ticket.trim())
+      const statusMatched = !filters.status.trim() || trace.status.includes(filters.status.trim())
+      return traceMatched && ticketMatched && statusMatched
+    })
+  }, [pageTraces, filters])
 
-  // 当选中 trace 时，获取详情
-  const fetchTraceDetail = async (_traceId: string, ticketId: string) => {
+  useEffect(() => {
+    setExpandedIds(new Set())
+    setSelectedSpan(null)
+  }, [page])
+
+  const updateFilter = (key: keyof typeof filters, value: string) => {
+    setPage(0)
+    setExpandedIds(new Set())
+    setFilters((prev) => ({ ...prev, [key]: value }))
+  }
+
+  const changePageSize = (value: number) => {
+    setPage(0)
+    setExpandedIds(new Set())
+    setPageSize(value)
+  }
+
+  const toggleTrace = async (trace: Trace) => {
+    // 切换 trace 时自动收起右侧详情抽屉，避免视觉错位
+    setSelectedSpan(null)
+    const next = new Set(expandedIds)
+    if (next.has(trace.trace_id)) {
+      next.delete(trace.trace_id)
+      setExpandedIds(next)
+      return
+    }
+
+    next.add(trace.trace_id)
+    setExpandedIds(next)
+    if (details[trace.trace_id]) return
+
+    setLoadingIds((prev) => new Set(prev).add(trace.trace_id))
     try {
-      const res = await fetch(`/api/tickets/${ticketId}/trace`)
-      if (res.ok) {
-        const data = await res.json()
-        setSelectedTraceDetail(data)
-      }
-    } catch {
-      setSelectedTraceDetail(null)
+      const detail = await api.getTicketTrace(trace.ticket_id)
+      setDetails((prev) => ({ ...prev, [trace.trace_id]: detail }))
+    } finally {
+      setLoadingIds((prev) => {
+        const copy = new Set(prev)
+        copy.delete(trace.trace_id)
+        return copy
+      })
     }
   }
 
-  const handleTraceClick = (trace: any) => {
-    setSelectedTraceId(trace.trace_id)
-    fetchTraceDetail(trace.trace_id, trace.ticket_id)
+  const clearFilters = () => {
+    setPage(0)
+    setExpandedIds(new Set())
+    setFilters({ trace: '', ticket: '', status: '' })
   }
 
-  // 最慢 span 排行
-  const flatSpans = (selectedTraceDetail?.spans || []).flatMap(function flatten(s: any): any[] {
-    return [s, ...(s.children || []).flatMap(flatten)]
-  })
-  const slowestSpans = [...flatSpans].sort((a, b) => (b.duration || 0) - (a.duration || 0)).slice(0, 5)
-
   return (
-    <div className="space-y-6">
+    <div className="space-y-5">
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-xl font-semibold flex items-center gap-2">
-            <Activity className="w-5 h-5 text-primary" />
+          <h2 className="flex items-center gap-2 text-xl font-semibold">
+            <Activity className="h-5 w-5 text-primary" />
             Agent 监控
           </h2>
-          <p className="text-sm text-muted-foreground mt-1">执行追踪与性能分析</p>
+          <p className="mt-1 text-sm text-muted-foreground">链路追踪、节点耗时与输入输出分析</p>
         </div>
         <Button variant="outline" size="sm" onClick={() => refetch()}>
-          <RefreshCw className="w-3.5 h-3.5 mr-1" />
+          <RefreshCw className="mr-1.5 h-3.5 w-3.5" />
           刷新
         </Button>
       </div>
 
-      <div className="grid grid-cols-12 gap-4">
-        {/* Trace 列表 */}
-        <div className="col-span-4">
-          <Card className="bg-card border-border">
-            <CardHeader className="pb-3">
-              <CardTitle className="text-sm">Trace 列表</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <ScrollArea className="h-[600px]">
-                {isLoading ? (
-                  <div className="space-y-2">
-                    {Array.from({ length: 5 }).map((_, i) => (
-                      <Skeleton key={i} className="h-16 rounded-md" />
-                    ))}
-                  </div>
-                ) : traces.length === 0 ? (
-                  <p className="text-muted-foreground text-sm text-center py-12">暂无 trace 数据</p>
-                ) : (
-                  <div className="space-y-2">
-                    {traces.map((trace: any) => (
-                      <div
-                        key={trace.trace_id}
-                        onClick={() => handleTraceClick(trace)}
-                        className={`p-3 rounded-md border cursor-pointer transition-colors ${
-                          selectedTraceId === trace.trace_id
-                            ? 'border-primary bg-primary/5'
-                            : 'border-border bg-background hover:border-primary/50'
-                        }`}
-                      >
-                        <div className="flex items-center justify-between mb-1.5">
-                          <span className="font-mono text-xs text-primary">{trace.trace_id?.slice(0, 20)}</span>
-                          <Badge variant="outline" className={`border-0 text-[10px] ${traceStatusStyles[trace.status] || ''}`}>
-                            {trace.status}
-                          </Badge>
-                        </div>
-                        <div className="flex items-center gap-3 text-[11px] text-muted-foreground">
-                          <span>{trace.ticket_id?.slice(0, 12)}</span>
-                          <span className="flex items-center gap-1"><Cpu className="w-3 h-3" />{trace.node_count || 0}</span>
-                          <span className="flex items-center gap-1"><Clock className="w-3 h-3" />{trace.duration != null ? `${trace.duration.toFixed(2)}s` : '-'}</span>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </ScrollArea>
-            </CardContent>
-          </Card>
-        </div>
-
-        {/* Trace 详情 */}
-        <div className="col-span-8 space-y-4">
-          {!selectedTraceDetail ? (
-            <Card className="bg-card border-border">
-              <CardContent className="py-20 text-center text-muted-foreground text-sm">
-                点击左侧 trace 查看执行链路
-              </CardContent>
-            </Card>
-          ) : (
-            <>
-              {/* 统计条 */}
-              <Card className="bg-card border-border">
-                <CardContent className="p-3">
-                  <div className="flex gap-6">
-                    <StatItem label="状态" value={selectedTraceDetail.status} />
-                    <StatItem label="总耗时" value={selectedTraceDetail.duration != null ? `${selectedTraceDetail.duration.toFixed(2)}s` : '-'} />
-                    <StatItem label="节点数" value={selectedTraceDetail.node_count || 0} />
-                    <StatItem label="LLM Token" value={selectedTraceDetail.total_tokens || 0} />
-                    <StatItem label="工具调用" value={selectedTraceDetail.total_tool_calls || 0} />
-                  </div>
-                </CardContent>
-              </Card>
-
-              <div className="grid grid-cols-5 gap-4">
-                {/* 执行链路 */}
-                <div className="col-span-3">
-                  <Card className="bg-card border-border">
-                    <CardHeader className="pb-3">
-                      <CardTitle className="text-sm">执行链路</CardTitle>
-                    </CardHeader>
-                    <CardContent>
-                      <ScrollArea className="h-[480px]">
-                        <div className="space-y-1.5">
-                          {(selectedTraceDetail.spans || []).map((span: any) => (
-                            <SpanTree key={span.span_id} span={span} depth={0} />
-                          ))}
-                        </div>
-                      </ScrollArea>
-                    </CardContent>
-                  </Card>
-                </div>
-
-                {/* 最慢 Span */}
-                <div className="col-span-2">
-                  <Card className="bg-card border-border">
-                    <CardHeader className="pb-3">
-                      <CardTitle className="text-sm flex items-center gap-2">
-                        <ArrowDownUp className="w-4 h-4 text-warning" />
-                        最慢 Span
-                      </CardTitle>
-                    </CardHeader>
-                    <CardContent>
-                      <div className="space-y-2">
-                        {slowestSpans.map((span: any, i: number) => (
-                          <div key={span.span_id} className="flex items-center justify-between p-2 rounded-md bg-background border border-border text-xs">
-                            <div className="flex items-center gap-2 min-w-0">
-                              <span className="text-muted-foreground w-4">{i + 1}</span>
-                              <span className="truncate">{span.name}</span>
-                              <Badge variant="outline" className="border-0 text-[10px] bg-secondary">
-                                {span.span_type}
-                              </Badge>
-                            </div>
-                            <span className="font-mono text-destructive shrink-0 ml-2">
-                              {span.duration != null ? `${span.duration.toFixed(3)}s` : '-'}
-                            </span>
-                          </div>
-                        ))}
-                      </div>
-                    </CardContent>
-                  </Card>
-                </div>
-              </div>
-            </>
-          )}
-        </div>
+      <div className="flex flex-wrap items-center gap-3">
+        <Input
+          value={filters.trace}
+          onChange={(event) => updateFilter('trace', event.target.value)}
+          placeholder="Trace ID"
+          className="h-10 w-[260px]"
+        />
+        <Input
+          value={filters.ticket}
+          onChange={(event) => updateFilter('ticket', event.target.value)}
+          placeholder="Ticket ID"
+          className="h-10 w-[260px]"
+        />
+        <Input
+          value={filters.status}
+          onChange={(event) => updateFilter('status', event.target.value)}
+          placeholder="状态"
+          className="h-10 w-[180px]"
+        />
+        <Button size="sm" className="h-10 px-5" onClick={() => refetch()}>
+          <Search className="mr-1.5 h-4 w-4" />
+          查询
+        </Button>
+        <Button variant="outline" size="sm" onClick={clearFilters}>
+          <X className="mr-1.5 h-3.5 w-3.5" />
+          重置
+        </Button>
       </div>
-    </div>
-  )
-}
 
-function StatItem({ label, value }: { label: string; value: string | number }) {
-  return (
-    <div className="text-center">
-      <p className="text-lg font-bold text-primary">{value}</p>
-      <p className="text-[10px] text-muted-foreground">{label}</p>
-    </div>
-  )
-}
+      <TraceList
+        traces={filteredTraces}
+        isLoading={isLoading}
+        pageSize={pageSize}
+        details={details}
+        expandedIds={expandedIds}
+        loadingIds={loadingIds}
+        onToggle={toggleTrace}
+        onNodeClick={setSelectedSpan}
+      />
 
-function SpanTree({ span, depth }: { span: any; depth: number }) {
-  const [expanded, setExpanded] = useState(false)
-  const typeIcons: Record<string, any> = { node: Cpu, react_iter: Bot, llm_call: Zap, tool_call: Wrench }
-  const Icon = typeIcons[span.span_type] || Cpu
-  const dot = spanStatusDot[span.status] || 'bg-muted-foreground'
-  const hasDetail = span.input_data || span.output_data || span.metadata
+      <TracePagination
+        page={page}
+        pageSize={pageSize}
+        total={total}
+        totalPages={totalPages}
+        isLoading={isLoading}
+        onPageChange={setPage}
+        onPageSizeChange={changePageSize}
+      />
 
-  return (
-    <div style={{ paddingLeft: depth * 16 }}>
-      <div
-        className={`flex items-center gap-2 p-2 rounded-md bg-background border border-border text-xs mb-1 cursor-pointer transition-colors hover:border-primary/50 ${hasDetail ? '' : ''}`}
-        onClick={() => hasDetail && setExpanded(!expanded)}
-      >
-        {hasDetail ? (
-          expanded ? <ChevronDown className="w-3 h-3 text-muted-foreground shrink-0" /> : <ChevronRight className="w-3 h-3 text-muted-foreground shrink-0" />
-        ) : (
-          <div className="w-3 shrink-0" />
-        )}
-        <div className={`w-2 h-2 rounded-full ${dot} shrink-0`} />
-        <Icon className="w-3 h-3 text-muted-foreground shrink-0" />
-        <div className="flex-1 min-w-0">
-          <span className="font-medium">{span.name}</span>
-          <span className="text-muted-foreground ml-2">{span.span_type}</span>
-          {span.status !== 'ok' && <span className="text-warning ml-1">({span.status})</span>}
-        </div>
-        <span className="font-mono text-muted-foreground shrink-0">
-          {span.duration != null ? `${span.duration.toFixed(3)}s` : '-'}
-        </span>
-      </div>
-      {expanded && hasDetail && (
-        <div className="ml-5 mb-1 rounded-md border border-border bg-background/50 p-2 text-xs space-y-2">
-          {span.input_data && (
-            <DetailSection icon={<ArrowRightLeft className="w-3 h-3 text-blue-400" />} title="输入" data={span.input_data} />
-          )}
-          {span.output_data && (
-            <DetailSection icon={<FileJson className="w-3 h-3 text-green-400" />} title="输出" data={span.output_data} />
-          )}
-          {span.metadata && (
-            <DetailSection icon={<Info className="w-3 h-3 text-yellow-400" />} title="元数据" data={span.metadata} />
-          )}
-        </div>
+      {selectedSpan && (
+        <NodeDrawer span={selectedSpan} onClose={() => setSelectedSpan(null)} />
       )}
-      {span.children?.map((child: any) => (
-        <SpanTree key={child.span_id} span={child} depth={depth + 1} />
+    </div>
+  )
+}
+
+function TraceList({
+  traces,
+  isLoading,
+  pageSize,
+  details,
+  expandedIds,
+  loadingIds,
+  onToggle,
+  onNodeClick,
+}: {
+  traces: Trace[]
+  isLoading: boolean
+  pageSize: number
+  details: Record<string, TraceDetail>
+  expandedIds: Set<string>
+  loadingIds: Set<string>
+  onToggle: (trace: Trace) => void
+  onNodeClick: (span: Span) => void
+}) {
+  if (isLoading) {
+    return (
+      <div className="space-y-3">
+        {Array.from({ length: pageSize }).map((_, index) => (
+          <Skeleton key={index} className="h-[42px] rounded-lg" />
+        ))}
+      </div>
+    )
+  }
+
+  if (traces.length === 0) {
+    return (
+      <Card className="bg-card border-border">
+        <CardContent className="py-14 text-center text-sm text-muted-foreground">
+          暂无匹配 trace
+        </CardContent>
+      </Card>
+    )
+  }
+
+  return (
+    <div className="space-y-3">
+      {traces.map((trace) => (
+        <TraceCard
+          key={trace.trace_id}
+          trace={trace}
+          detail={details[trace.trace_id]}
+          expanded={expandedIds.has(trace.trace_id)}
+          loading={loadingIds.has(trace.trace_id)}
+          onToggle={() => onToggle(trace)}
+          onNodeClick={onNodeClick}
+        />
       ))}
     </div>
   )
 }
 
-function DetailSection({ icon, title, data }: { icon: React.ReactNode; title: string; data: any }) {
-  const [collapsed, setCollapsed] = useState(false)
-  const content = typeof data === 'string' ? data : JSON.stringify(data, null, 2)
-  const isLong = content.length > 500
+function TracePagination({
+  page,
+  pageSize,
+  total,
+  totalPages,
+  isLoading,
+  onPageChange,
+  onPageSizeChange,
+}: {
+  page: number
+  pageSize: number
+  total: number
+  totalPages: number
+  isLoading: boolean
+  onPageChange: (page: number) => void
+  onPageSizeChange: (size: number) => void
+}) {
+  const pages = getVisiblePages(page, totalPages)
+
+  return (
+    <div className="flex items-center justify-center gap-3 py-2">
+      <Button
+        variant="ghost"
+        size="icon-sm"
+        disabled={page === 0 || isLoading}
+        onClick={() => onPageChange(Math.max(page - 1, 0))}
+        className="text-muted-foreground"
+      >
+        <ChevronLeft className="h-4 w-4" />
+      </Button>
+      <div className="flex items-center gap-2">
+        {pages.map((item, index) => (
+          item === 'ellipsis' ? (
+            <span key={`ellipsis-${index}`} className="px-2 text-sm text-muted-foreground">...</span>
+          ) : (
+            <button
+              key={item}
+              type="button"
+              disabled={isLoading}
+              onClick={() => onPageChange(item)}
+              className={`h-10 min-w-10 rounded-lg border px-3 text-sm transition-colors ${
+                item === page
+                  ? 'border-primary bg-primary/10 text-primary'
+                  : 'border-border bg-card text-foreground hover:border-primary/60'
+              }`}
+            >
+              {item + 1}
+            </button>
+          )
+        ))}
+      </div>
+      <Button
+        variant="ghost"
+        size="icon-sm"
+        disabled={page >= totalPages - 1 || isLoading}
+        onClick={() => onPageChange(Math.min(page + 1, totalPages - 1))}
+        className="text-muted-foreground"
+      >
+        <ChevronRight className="h-4 w-4" />
+      </Button>
+      <select
+        value={pageSize}
+        onChange={(event) => onPageSizeChange(Number(event.target.value))}
+        className="ml-3 h-10 rounded-lg border border-border bg-card px-3 text-sm text-foreground outline-none focus:border-primary"
+      >
+        {PAGE_SIZE_OPTIONS.map((option) => (
+          <option key={option} value={option}>{option} / page</option>
+        ))}
+      </select>
+      <span className="text-xs text-muted-foreground">共 {total} 条</span>
+    </div>
+  )
+}
+
+function TraceCard({
+  trace,
+  detail,
+  expanded,
+  loading,
+  onToggle,
+  onNodeClick,
+}: {
+  trace: Trace
+  detail?: TraceDetail
+  expanded: boolean
+  loading: boolean
+  onToggle: () => void
+  onNodeClick: (span: Span) => void
+}) {
+  const rounds = useMemo(() => buildRounds(detail), [detail])
+  const flatNodes = rounds.flatMap((round) => round.nodes)
+  const success = flatNodes.filter((node) => node.status !== 'error').length
+  const failed = flatNodes.length - success
+
+  return (
+    <Card className="overflow-hidden rounded-lg bg-card border-border">
+      <button
+        type="button"
+        onClick={onToggle}
+        className="grid w-full grid-cols-[minmax(280px,1.4fr)_minmax(180px,0.8fr)_64px_72px_88px_56px] items-center gap-3 px-4 py-2.5 text-left transition-colors hover:bg-background/70"
+      >
+        <span className="min-w-0 space-y-0.5">
+          <span className="block truncate text-[13px] font-medium text-foreground">
+            {trace.ticket_summary || '暂无工单内容'}
+          </span>
+          <span className="font-mono text-[10px] text-primary/70">Trace {trace.trace_id.slice(0, 18)}...</span>
+        </span>
+        <span className="min-w-0 space-y-0.5">
+          <span className="block font-mono text-[13px] text-foreground">{trace.ticket_id.slice(0, 16)}</span>
+          <span className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+            <Tag className="h-3 w-3" />
+            {trace.ticket_category ? categoryLabels[trace.ticket_category] || trace.ticket_category : '未分类'}
+            {trace.ticket_priority ? ` · ${trace.ticket_priority}` : ''}
+          </span>
+        </span>
+        <span className="text-[13px] tabular-nums text-foreground" title="节点数">
+          <strong className="font-medium">{trace.node_count || 0}</strong>
+          <span className="ml-1 text-[10px] text-muted-foreground">节点</span>
+        </span>
+        <span className="flex items-center gap-1 text-[13px] tabular-nums text-foreground" title="知识库引用数">
+          <BookOpen className="h-3 w-3 text-primary" />
+          <strong className="font-medium">{trace.reference_count || 0}</strong>
+        </span>
+        <span className="text-[13px] tabular-nums text-foreground" title="总耗时">
+          <strong className="font-medium">{formatMilliseconds(trace.duration)}</strong>
+        </span>
+        <span className="flex shrink-0 items-center justify-end text-[11px] text-primary">
+          {expanded ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+        </span>
+      </button>
+
+      {expanded && (
+        <div className="border-t border-border p-3">
+          {loading ? (
+            <div className="py-8 text-center text-sm text-muted-foreground">加载 Timeline...</div>
+          ) : detail ? (
+            <div className="space-y-3">
+              <TraceBusinessSummary trace={detail} />
+              <div className="overflow-x-auto rounded-lg border border-border bg-background">
+                <div className="min-w-[720px]">
+              <TimelineStats
+                totalNodes={flatNodes.length}
+                totalRounds={rounds.length}
+                success={success}
+                failed={failed}
+              />
+              <TimelineHeader />
+              {rounds.map((round) => (
+                <TimelineRoundView
+                  key={round.index}
+                  round={round}
+                  onNodeClick={onNodeClick}
+                />
+              ))}
+              <TimelineLegend />
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="py-8 text-center text-sm text-muted-foreground">暂无 Timeline 数据</div>
+          )}
+        </div>
+      )}
+    </Card>
+  )
+}
+
+function TraceBusinessSummary({ trace }: { trace: TraceDetail }) {
+  return (
+    <div className="grid grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)] gap-3">
+      <div className="rounded-lg border border-border bg-background p-3">
+        <div className="mb-2 flex items-center gap-2 text-xs font-medium text-muted-foreground">
+          <Info className="h-3.5 w-3.5 text-primary" />
+          工单上下文
+        </div>
+        <p className="line-clamp-2 text-sm text-foreground">
+          {trace.ticket_summary || '暂无工单内容'}
+        </p>
+        <div className="mt-3 flex flex-wrap gap-2">
+          <Badge variant="outline" className="border-border bg-card text-xs">
+            {trace.ticket_category ? categoryLabels[trace.ticket_category] || trace.ticket_category : '未分类'}
+          </Badge>
+          <Badge variant="outline" className="border-border bg-card text-xs">
+            {trace.ticket_priority || '无优先级'}
+          </Badge>
+          <Badge variant="outline" className="border-border bg-card text-xs">
+            评分 {trace.ticket_review_score ?? '-'}
+          </Badge>
+        </div>
+      </div>
+      <div className="rounded-lg border border-border bg-background p-3">
+        <div className="mb-2 flex items-center gap-2 text-xs font-medium text-muted-foreground">
+          <CheckCircle2 className="h-3.5 w-3.5 text-success" />
+          处理结果
+        </div>
+        <p className="line-clamp-2 text-sm text-foreground">
+          {trace.ticket_result || '暂无处理结果'}
+        </p>
+        <div className="mt-3 flex flex-wrap gap-2">
+          <Badge variant="outline" className="border-primary/30 bg-primary/10 text-xs text-primary">
+            知识库引用 {trace.reference_count || 0}
+          </Badge>
+          <Badge variant="outline" className={`border-0 text-xs ${traceStatusStyles[trace.status] || ''}`}>
+            {trace.status}
+          </Badge>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function TimelineStats({
+  totalNodes,
+  totalRounds,
+  success,
+  failed,
+}: {
+  totalNodes: number
+  totalRounds: number
+  success: number
+  failed: number
+}) {
+  return (
+    <div className="flex gap-8 border-b border-border px-3 py-2 text-xs">
+      <span className="text-muted-foreground">总节点数: <strong className="text-foreground">{totalNodes}</strong></span>
+      <span className="text-muted-foreground">总轮次: <strong className="text-foreground">{totalRounds}</strong></span>
+      <span className="text-muted-foreground">成功: <strong className="text-success">{success}</strong></span>
+      <span className="text-muted-foreground">失败: <strong className="text-destructive">{failed}</strong></span>
+    </div>
+  )
+}
+
+function TimelineHeader() {
+  return (
+    <div className="grid grid-cols-[28px_180px_1fr_60px_56px_120px] border-b border-border px-3 py-1.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+      <div className="text-center">类型</div>
+      <div>名称</div>
+      <div>业务摘要</div>
+      <div className="text-right">耗时</div>
+      <div className="text-center">状态</div>
+      <div>时间线</div>
+    </div>
+  )
+}
+
+function TimelineRoundView({
+  round,
+  onNodeClick,
+}: {
+  round: TimelineRound
+  onNodeClick: (span: Span) => void
+}) {
+  const [expanded, setExpanded] = useState(round.index === 0)
+  const roundDuration = Math.max(round.duration, 0.001)
 
   return (
     <div>
-      <div className="flex items-center gap-1.5 cursor-pointer select-none" onClick={() => setCollapsed(!collapsed)}>
-        {icon}
-        <span className="font-medium text-muted-foreground">{title}</span>
-        {isLong && (
-          collapsed ? <ChevronRight className="w-3 h-3 text-muted-foreground" /> : <ChevronDown className="w-3 h-3 text-muted-foreground" />
-        )}
-      </div>
-      {!collapsed && (
-        <pre className="mt-1 p-2 rounded bg-card border border-border overflow-x-auto max-h-64 overflow-y-auto text-[11px] text-foreground/80 whitespace-pre-wrap break-all">
-          {isLong && !collapsed ? content.slice(0, 500) + '...' : content}
-        </pre>
+      <button
+        type="button"
+        onClick={() => setExpanded((value) => !value)}
+        className={`grid w-full grid-cols-[28px_180px_1fr_60px_56px_120px] items-center gap-1 border-b border-border px-3 py-1.5 text-left transition-colors ${
+          expanded ? 'bg-primary/5' : 'hover:bg-card'
+        }`}
+      >
+        <span className="col-span-2 flex items-center gap-2">
+          <span className="rounded bg-primary/15 px-1.5 py-0.5 text-[10px] font-semibold text-primary">
+            R{round.index + 1}
+          </span>
+          <span className="truncate font-mono text-[10px] text-muted-foreground">{round.title}</span>
+        </span>
+        <span className="truncate text-[10px] text-muted-foreground">
+          {round.nodes.length} 节点 · ✓{round.success}{round.error > 0 && ` · ×${round.error}`}
+        </span>
+        <span className="text-right font-mono text-[11px] tabular-nums text-foreground/80">
+          {formatSeconds(round.duration)}
+        </span>
+        <span className="text-center text-[10px] text-muted-foreground">—</span>
+        <span className="text-right text-[10px] text-primary">{expanded ? '收起' : '展开'}</span>
+      </button>
+      {expanded ? (
+        <>
+          {round.nodes.map((node) => (
+            <TimelineNodeRow
+              key={node.span_id}
+              node={node}
+              totalDuration={roundDuration}
+              onClick={() => onNodeClick(node)}
+            />
+          ))}
+        </>
+      ) : (
+        <CompactRoundBar nodes={round.nodes} totalDuration={roundDuration} />
       )}
     </div>
   )
+}
+
+function CompactRoundBar({ nodes, totalDuration }: { nodes: TimelineNode[]; totalDuration: number }) {
+  let offset = 0
+  return (
+    <div className="grid grid-cols-[28px_180px_1fr_60px_56px_120px] items-center border-b border-border px-3 py-1 text-[11px] text-muted-foreground">
+      <div />
+      <div className="text-primary">折叠预览</div>
+      <div />
+      <div />
+      <div />
+      <div className="relative h-2 rounded bg-muted">
+        {nodes.map((node) => {
+          const left = totalDuration > 0 ? (offset / totalDuration) * 100 : 0
+          const width = totalDuration > 0 ? Math.max(((node.duration || 0) / totalDuration) * 100, 1) : 1
+          offset += node.duration || 0
+          return (
+            <div
+              key={node.span_id}
+              className={`absolute top-0 h-full rounded ${nodeTypeColors[node.span_type] || 'bg-muted-foreground'}`}
+              style={{ left: `${left}%`, width: `${width}%` }}
+            />
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+function TimelineNodeRow({
+  node,
+  totalDuration,
+  onClick,
+}: {
+  node: TimelineNode
+  totalDuration: number
+  onClick: () => void
+}) {
+  const Icon = nodeTypeIcons[node.span_type] || Cpu
+  const width = totalDuration > 0 ? Math.max(((node.duration || 0) / totalDuration) * 100, 1) : 1
+  const indent = Math.min(node.depth * 16, 48)
+  const summary = summarizeSpan(node)
+
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="grid w-full grid-cols-[28px_180px_1fr_60px_56px_120px] items-center gap-1 border-b border-border/60 px-3 py-1 text-left transition-colors hover:bg-card"
+    >
+      <div className="text-center">
+        <span className={`inline-block h-2 w-2 rounded-full ${nodeTypeColors[node.span_type] || 'bg-muted-foreground'}`} />
+      </div>
+      <div className="flex min-w-0 items-center gap-1.5" style={{ paddingLeft: indent }}>
+        <Icon className="h-3 w-3 shrink-0 text-muted-foreground" />
+        <span className="truncate text-[11px] font-medium">{node.name}</span>
+      </div>
+      <div className="truncate text-[11px] text-muted-foreground">{summary}</div>
+      <div className="text-right font-mono text-[11px] tabular-nums text-foreground/80">
+        {formatSeconds(node.duration)}
+      </div>
+      <div className="text-center">
+        <Badge variant="outline" className={`border-0 px-1 py-0 text-[9px] leading-tight ${spanStatusStyles[node.status] || 'bg-secondary'}`}>
+          {node.status}
+        </Badge>
+      </div>
+      <div className="relative h-1.5 rounded-full bg-muted overflow-hidden">
+        <div
+          className={`absolute top-0 left-0 h-full rounded-full ${nodeTypeColors[node.span_type] || 'bg-muted-foreground'}`}
+          style={{ width: `${width}%` }}
+        />
+      </div>
+    </button>
+  )
+}
+
+function TimelineLegend() {
+  const items = [
+    ['node', '工作流节点'],
+    ['react_iter', 'ReAct 推理'],
+    ['llm_call', 'LLM 调用'],
+    ['tool_call', '工具调用'],
+  ]
+  return (
+    <div className="flex flex-wrap gap-4 px-3 py-2 text-xs text-muted-foreground">
+      {items.map(([type, label]) => (
+        <span key={type} className="flex items-center gap-2">
+          <span className={`h-2.5 w-2.5 rounded-full ${nodeTypeColors[type]}`} />
+          {label}
+        </span>
+      ))}
+      <span className="flex items-center gap-2">
+        <span className="h-2.5 w-2.5 rounded-full bg-destructive" />
+        错误
+      </span>
+    </div>
+  )
+}
+
+function NodeDrawer({ span, onClose }: { span: Span; onClose: () => void }) {
+  const Icon = nodeTypeIcons[span.span_type] || Cpu
+  return (
+    <div className="fixed inset-0 z-50 flex justify-end bg-black/20">
+      <aside className="h-full w-[640px] border-l border-border bg-popover shadow-xl">
+        <div className="flex items-center justify-between border-b border-border px-5 py-4">
+          <div>
+            <h3 className="flex items-center gap-2 text-base font-semibold">
+              <Icon className="h-4 w-4 text-primary" />
+              节点详情
+            </h3>
+            <p className="mt-1 text-xs text-muted-foreground">{nodeTypeLabels[span.span_type] || span.span_type}</p>
+          </div>
+          <Button variant="ghost" size="icon-sm" onClick={onClose}>
+            <X className="h-4 w-4" />
+          </Button>
+        </div>
+
+        <ScrollArea className="h-[calc(100vh-73px)]">
+          <div className="space-y-5 p-5">
+            <div className="flex items-center gap-3">
+              <Badge variant="outline" className={`border-0 ${spanStatusStyles[span.status] || 'bg-secondary'}`}>
+                {span.status}
+              </Badge>
+              <Badge variant="outline" className="border-border bg-background">
+                {formatSeconds(span.duration)}
+              </Badge>
+            </div>
+
+            <Field label="节点名称" value={span.name} />
+            <Field label="Span ID" value={span.span_id} mono />
+            <Field label="开始时间" value={formatTimestamp(span.start_time)} />
+
+            {span.status === 'error' && (
+              <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 p-3 text-xs text-destructive">
+                <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                <span>该节点执行异常，请查看输出数据或元数据。</span>
+              </div>
+            )}
+
+            {span.input_data && (
+              <Payload title="输入数据" icon={<ArrowRightLeft className="h-3.5 w-3.5 text-sky-400" />} data={span.input_data} />
+            )}
+            {span.output_data && (
+              <Payload title="输出数据" icon={<FileJson className="h-3.5 w-3.5 text-green-400" />} data={span.output_data} />
+            )}
+            {span.metadata && (
+              <Payload title="元数据" icon={<Info className="h-3.5 w-3.5 text-yellow-400" />} data={span.metadata} />
+            )}
+          </div>
+        </ScrollArea>
+      </aside>
+    </div>
+  )
+}
+
+function Field({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
+  return (
+    <div>
+      <div className="mb-1 text-xs text-muted-foreground">{label}</div>
+      <div className={`break-all text-sm ${mono ? 'font-mono text-xs' : 'font-medium'}`}>{value || '-'}</div>
+    </div>
+  )
+}
+
+function Payload({ title, icon, data }: { title: string; icon: React.ReactNode; data: unknown }) {
+  const content = typeof data === 'string' ? data : JSON.stringify(data, null, 2)
+  const copy = async () => {
+    await navigator.clipboard.writeText(content)
+  }
+
+  return (
+    <div>
+      <div className="mb-2 flex items-center justify-between">
+        <div className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+          {icon}
+          <span>{title}</span>
+        </div>
+        <Button variant="ghost" size="sm" onClick={copy}>
+          <Copy className="mr-1 h-3.5 w-3.5" />
+          复制
+        </Button>
+      </div>
+      <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-md border border-border bg-background p-3 text-[12px] leading-relaxed text-foreground/85">
+        {content}
+      </pre>
+    </div>
+  )
+}
+
+function buildRounds(detail?: TraceDetail): TimelineRound[] {
+  if (!detail) return []
+  const roots = detail.spans || []
+  return roots.map((root, index) => {
+    const nodes = flattenWithDepth(root, 0, index)
+    return {
+      index,
+      title: `${root.name}: ${root.span_id.slice(0, 10)}`,
+      nodes,
+      duration: nodes.reduce((sum, node) => sum + (node.duration || 0), 0),
+      success: nodes.filter((node) => node.status !== 'error').length,
+      error: nodes.filter((node) => node.status === 'error').length,
+    }
+  })
+}
+
+function flattenWithDepth(span: Span, depth: number, roundIndex: number): TimelineNode[] {
+  return [
+    { ...span, depth, roundIndex },
+    ...(span.children || []).flatMap((child) => flattenWithDepth(child, depth + 1, roundIndex)),
+  ]
+}
+
+function getVisiblePages(page: number, totalPages: number): Array<number | 'ellipsis'> {
+  if (totalPages <= 7) {
+    return Array.from({ length: totalPages }, (_, index) => index)
+  }
+
+  const pages = new Set<number>([0, totalPages - 1])
+  for (let index = page - 1; index <= page + 1; index += 1) {
+    if (index > 0 && index < totalPages - 1) {
+      pages.add(index)
+    }
+  }
+
+  const sorted = Array.from(pages).sort((a, b) => a - b)
+  const visible: Array<number | 'ellipsis'> = []
+  sorted.forEach((item, index) => {
+    const previous = sorted[index - 1]
+    if (index > 0 && item - previous > 1) {
+      visible.push('ellipsis')
+    }
+    visible.push(item)
+  })
+  return visible
+}
+
+function summarizeSpan(span: Span): string {
+  const output = span.output_data || {}
+  const input = span.input_data || {}
+  const metadata = span.metadata || {}
+
+  const fields = [
+    output.category,
+    output.priority,
+    output.answer,
+    output.result,
+    output.final_answer,
+    output.processing_result,
+    output.review_score != null ? `评分 ${output.review_score}` : undefined,
+    output.query,
+    input.content,
+    input.query,
+    metadata.tool_name,
+    metadata.iteration != null ? `第 ${metadata.iteration} 次推理` : undefined,
+  ]
+    .filter((item): item is string | number => item !== undefined && item !== null && item !== '')
+    .map(String)
+
+  if (fields.length > 0) {
+    return truncateText(fields.join(' · '), 42)
+  }
+
+  if (span.name.includes('classify')) return '识别工单分类、优先级与处理路径'
+  if (span.name.includes('process')) return '结合上下文与知识库生成处理方案'
+  if (span.name.includes('review')) return '复核处理结果质量并判断是否重试'
+  if (span.name.includes('receive')) return '接收用户工单并初始化处理状态'
+  if (span.span_type === 'llm_call') return '调用大模型生成推理或回复内容'
+  if (span.span_type === 'tool_call') return '调用外部工具获取支撑信息'
+  if (span.span_type === 'react_iter') return '执行 ReAct 思考、行动与观察循环'
+  return '执行工作流节点'
+}
+
+function formatSeconds(value: number | null | undefined): string {
+  if (value == null) return '-'
+  if (value < 1) return `${Math.round(value * 1000)}ms`
+  return `${value.toFixed(2)}s`
+}
+
+function formatMilliseconds(value: number | null | undefined): string {
+  if (value == null) return '-'
+  return `${Math.round(value * 1000)}ms`
+}
+
+function formatTimestamp(value: number | null | undefined): string {
+  if (!value) return '-'
+  return new Date(value * 1000).toLocaleString('zh-CN')
+}
+
+function truncateText(value: string, maxLength: number): string {
+  return value.length > maxLength ? `${value.slice(0, maxLength)}...` : value
 }

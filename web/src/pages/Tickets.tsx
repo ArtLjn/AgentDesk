@@ -159,13 +159,13 @@ export function Tickets() {
         <Table>
           <TableHeader>
             <TableRow className="border-border hover:bg-transparent">
-              <TableHead className="text-muted-foreground text-xs">工单 ID</TableHead>
-              <TableHead className="text-muted-foreground text-xs">内容</TableHead>
-              <TableHead className="text-muted-foreground text-xs">分类</TableHead>
-              <TableHead className="text-muted-foreground text-xs">优先级</TableHead>
-              <TableHead className="text-muted-foreground text-xs">状态</TableHead>
-              <TableHead className="text-muted-foreground text-xs">评分</TableHead>
-              <TableHead className="text-muted-foreground text-xs">创建时间</TableHead>
+              <TableHead className="text-muted-foreground text-[11px] h-8 px-3">工单 ID</TableHead>
+              <TableHead className="text-muted-foreground text-[11px] h-8 px-3">内容</TableHead>
+              <TableHead className="text-muted-foreground text-[11px] h-8 px-3">分类</TableHead>
+              <TableHead className="text-muted-foreground text-[11px] h-8 px-3">优先级</TableHead>
+              <TableHead className="text-muted-foreground text-[11px] h-8 px-3">状态</TableHead>
+              <TableHead className="text-muted-foreground text-[11px] h-8 px-3">评分</TableHead>
+              <TableHead className="text-muted-foreground text-[11px] h-8 px-3">创建时间</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -173,15 +173,15 @@ export function Tickets() {
               Array.from({ length: 5 }).map((_, i) => (
                 <TableRow key={i} className="border-border">
                   {Array.from({ length: 7 }).map((_, j) => (
-                    <TableCell key={j}>
-                      <div className="h-4 w-20 bg-muted rounded animate-pulse" />
+                    <TableCell key={j} className="py-1.5 px-3">
+                      <div className="h-3 w-20 bg-muted rounded animate-pulse" />
                     </TableCell>
                   ))}
                 </TableRow>
               ))
             ) : filtered.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={7} className="text-center text-muted-foreground py-12">
+                <TableCell colSpan={7} className="text-center text-muted-foreground py-10 text-sm">
                   暂无工单数据
                 </TableCell>
               </TableRow>
@@ -189,18 +189,18 @@ export function Tickets() {
               filtered.map((ticket: any) => (
                 <TableRow
                   key={ticket.ticket_id}
-                  className="border-border cursor-pointer hover:bg-muted/50 transition-colors"
+                  className="border-border cursor-pointer hover:bg-muted/40 transition-colors"
                   onClick={() => navigate(`/tickets/${ticket.ticket_id}`)}
                 >
-                  <TableCell className="font-mono text-xs text-primary">{ticket.ticket_id?.slice(0, 16)}</TableCell>
-                  <TableCell className="max-w-[240px] truncate text-sm">{ticket.content}</TableCell>
-                  <TableCell>{ticket.category ? <CategoryBadge category={ticket.category} /> : '-'}</TableCell>
-                  <TableCell>{ticket.priority ? <PriorityBadge priority={ticket.priority} /> : '-'}</TableCell>
-                  <TableCell><StatusBadge status={ticket.status} /></TableCell>
-                  <TableCell className="font-mono text-xs">
+                  <TableCell className="font-mono text-[11px] text-primary py-1.5 px-3">{ticket.ticket_id?.slice(0, 16)}</TableCell>
+                  <TableCell className="max-w-[280px] truncate text-[12px] py-1.5 px-3">{ticket.content}</TableCell>
+                  <TableCell className="py-1.5 px-3">{ticket.category ? <CategoryBadge category={ticket.category} /> : '-'}</TableCell>
+                  <TableCell className="py-1.5 px-3">{ticket.priority ? <PriorityBadge priority={ticket.priority} /> : '-'}</TableCell>
+                  <TableCell className="py-1.5 px-3"><StatusBadge status={ticket.status} /></TableCell>
+                  <TableCell className="font-mono text-[11px] py-1.5 px-3 tabular-nums">
                     {ticket.review_score != null ? ticket.review_score.toFixed(2) : '-'}
                   </TableCell>
-                  <TableCell className="text-xs text-muted-foreground">
+                  <TableCell className="text-[11px] text-muted-foreground py-1.5 px-3 tabular-nums">
                     {ticket.created_at ? new Date(ticket.created_at).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '-'}
                   </TableCell>
                 </TableRow>

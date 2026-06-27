@@ -61,9 +61,26 @@ export function useAnalytics() {
 }
 
 // Knowledge
+export function useKnowledge(params?: Record<string, string>) {
+  return useQuery({
+    queryKey: ['knowledge', params],
+    queryFn: () => api.getKnowledge(params),
+  })
+}
+
 export function useUploadKnowledge() {
+  const qc = useQueryClient()
   return useMutation({
     mutationFn: (data: { title: string; content: string; category?: string }) =>
       api.uploadKnowledge(data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['knowledge'] }),
+  })
+}
+
+// Settings
+export function useSystemSettings() {
+  return useQuery({
+    queryKey: ['systemSettings'],
+    queryFn: () => api.getSettings(),
   })
 }

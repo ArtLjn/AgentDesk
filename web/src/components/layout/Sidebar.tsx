@@ -1,4 +1,5 @@
-import { NavLink } from 'react-router-dom'
+import { useState } from 'react'
+import { NavLink, useNavigate } from 'react-router-dom'
 import {
   LayoutDashboard,
   Ticket,
@@ -6,8 +7,10 @@ import {
   BookOpen,
   Settings,
   Bot,
+  LogOut,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { api } from '@/lib/api'
 
 const navItems = [
   { to: '/', icon: LayoutDashboard, label: 'Dashboard' },
@@ -18,6 +21,19 @@ const navItems = [
 ]
 
 export function Sidebar() {
+  const navigate = useNavigate()
+  const [loggingOut, setLoggingOut] = useState(false)
+
+  async function handleLogout() {
+    if (loggingOut) return
+    setLoggingOut(true)
+    try {
+      await api.logout()
+    } finally {
+      navigate('/login', { replace: true })
+    }
+  }
+
   return (
     <aside className="fixed left-0 top-0 bottom-0 w-56 bg-card border-r border-border flex flex-col z-50">
       {/* Logo */}
@@ -52,11 +68,20 @@ export function Sidebar() {
       </nav>
 
       {/* Bottom */}
-      <div className="p-3 border-t border-border">
+      <div className="p-3 border-t border-border space-y-2">
         <div className="flex items-center gap-2 text-xs text-muted-foreground">
           <div className="w-1.5 h-1.5 rounded-full bg-success animate-pulse" />
           <span>服务在线</span>
         </div>
+        <button
+          type="button"
+          onClick={handleLogout}
+          disabled={loggingOut}
+          className="w-full flex items-center gap-2 px-3 py-1.5 rounded-md text-xs text-muted-foreground hover:text-foreground hover:bg-muted transition-colors disabled:opacity-50"
+        >
+          <LogOut className="w-3.5 h-3.5" />
+          {loggingOut ? '退出中...' : '退出登录'}
+        </button>
       </div>
     </aside>
   )

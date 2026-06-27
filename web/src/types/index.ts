@@ -6,6 +6,7 @@ export interface Ticket {
   category: string | null
   priority: string | null
   processing_result: string | null
+  references: string[]
   review_score: number | null
   retry_count: number
   status: TicketStatus
@@ -34,6 +35,13 @@ export interface Trace {
   total_tool_calls: number
   node_count: number
   error: string | null
+  ticket_summary?: string | null
+  ticket_category?: TicketCategory | null
+  ticket_priority?: TicketPriority | null
+  ticket_result?: string | null
+  ticket_review_score?: number | null
+  reference_count?: number
+  references?: string[]
 }
 
 export interface Span {
@@ -62,7 +70,22 @@ export interface TraceDetail {
   node_count: number
   start_time: number
   end_time: number | null
+  ticket_summary?: string | null
+  ticket_category?: TicketCategory | null
+  ticket_priority?: TicketPriority | null
+  ticket_result?: string | null
+  ticket_review_score?: number | null
+  reference_count?: number
+  references?: string[]
   spans: Span[]
+}
+
+export interface TraceListResponse {
+  traces: Trace[]
+  count: number
+  total: number
+  limit: number
+  offset: number
 }
 
 // 统计相关
@@ -111,6 +134,29 @@ export interface KnowledgeUploadRequest {
   title: string
   content: string
   category?: string
+}
+
+export interface KnowledgeChunk {
+  index: number
+  content: string
+  point_id: string
+}
+
+export interface KnowledgeDocument {
+  id: string
+  title: string
+  category: string
+  source?: string
+  content: string
+  preview: string
+  chunk_count: number
+  chunks: KnowledgeChunk[]
+}
+
+export interface KnowledgeListResponse {
+  documents: KnowledgeDocument[]
+  count: number
+  next_offset: string | null
 }
 
 // WebSocket
