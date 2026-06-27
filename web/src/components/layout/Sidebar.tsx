@@ -8,6 +8,7 @@ import {
   Settings,
   Bot,
   LogOut,
+  ShieldCheck,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { api } from '@/lib/api'
@@ -15,6 +16,7 @@ import { api } from '@/lib/api'
 const navItems = [
   { to: '/', icon: LayoutDashboard, label: 'Dashboard' },
   { to: '/tickets', icon: Ticket, label: '工单管理' },
+  { to: '/reviews', icon: ShieldCheck, label: '审核工作台' },
   { to: '/monitor', icon: Activity, label: 'Agent 监控' },
   { to: '/knowledge', icon: BookOpen, label: '知识库' },
   { to: '/settings', icon: Settings, label: '系统设置' },
