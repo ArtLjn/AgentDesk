@@ -68,6 +68,82 @@ class TestSuggestDecision:
         assert result["recommended_decision"] == "approve"
         assert result["confidence"] == 0.85
         assert "无安全隐患" in result["reasoning"]
+        # 验证全部 4 个字段都返回
+        assert set(result.keys()) >= {
+            "recommended_decision", "confidence", "reasoning", "key_concerns"
+        }
+        assert isinstance(result["key_concerns"], list)
+
+    @pytest.mark.asyncio
+    async def test_suggest_decision_invalid_structure_falls_back(self) -> None:
+        """场景：LLM 返回结构不合规（非法 recommended_decision），触发降级。"""
+        agent = _build_agent()
+        # recommended_decision=bogus 不是合法枚举值
+        bad_payload = {"recommended_decision": "bogus", "confidence": 0.5}
+        agent._client = AsyncMock()
+        agent._client.chat_completions_create = AsyncMock(
+            return_value=_make_llm_response(json.dumps(bad_payload, ensure_ascii=False))
+        )
+
+        with patch("asyncio.sleep", new=AsyncMock(return_value=None)):
+            result = await agent.suggest_decision(
+                ticket_id="TK-004",
+                trigger_type="user_request",
+                trigger_reason="用户主动复审",
+                processing_result=None,
+                review_score=None,
+            )
+
+        assert result.get("fallback") is True
+        assert result["recommended_decision"] == "approve"
+
+    @pytest.mark.asyncio
+    async def test_suggest_decision_missing_required_field_falls_back(self) -> None:
+        """场景：LLM 返回缺关键字段（无 reasoning），触发降级。"""
+        agent = _build_agent()
+        bad_payload = {"recommended_decision": "approve", "confidence": 0.9}
+        agent._client = AsyncMock()
+        agent._client.chat_completions_create = AsyncMock(
+            return_value=_make_llm_response(json.dumps(bad_payload, ensure_ascii=False))
+        )
+
+        with patch("asyncio.sleep", new=AsyncMock(return_value=None)):
+            result = await agent.suggest_decision(
+                ticket_id="TK-005",
+                trigger_type="error_fallback",
+                trigger_reason="工作流异常",
+                processing_result=None,
+                review_score=None,
+            )
+
+        assert result.get("fallback") is True
+        assert result["recommended_decision"] == "reprocess"
+
+    @pytest.mark.asyncio
+    async def test_suggest_decision_confidence_out_of_range_falls_back(self) -> None:
+        """场景：LLM 返回 confidence=1.5 越界，触发降级。"""
+        agent = _build_agent()
+        bad_payload = {
+            "recommended_decision": "approve",
+            "confidence": 1.5,
+            "reasoning": "x",
+            "key_concerns": [],
+        }
+        agent._client = AsyncMock()
+        agent._client.chat_completions_create = AsyncMock(
+            return_value=_make_llm_response(json.dumps(bad_payload, ensure_ascii=False))
+        )
+
+        with patch("asyncio.sleep", new=AsyncMock(return_value=None)):
+            result = await agent.suggest_decision(
+                ticket_id="TK-006",
+                trigger_type="escalate",
+                trigger_reason="VIP",
+                processing_result=None,
+                review_score=None,
+            )
+
+        assert result.get("fallback") is True
 
     @pytest.mark.asyncio
     async def test_suggest_decision_llm_retryable_error_falls_back(self) -> None:

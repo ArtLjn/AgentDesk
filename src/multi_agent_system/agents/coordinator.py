@@ -4,10 +4,12 @@ import json
 from typing import TYPE_CHECKING
 
 from openai import APIConnectionError, APIError, AuthenticationError, RateLimitError
+from pydantic import ValidationError
 
 from src.multi_agent_system.config import Settings
 from src.multi_agent_system.core import CachedLLMClient, fallback_registry, with_retry
 from src.multi_agent_system.core.exceptions import NonRetryableError, RetryableError
+from src.multi_agent_system.models.review import AISuggestion
 
 if TYPE_CHECKING:
     from src.multi_agent_system.tools.knowledge_search import KnowledgeSearchTool
@@ -480,9 +482,18 @@ class CoordinatorAgent:
         raw = response.choices[0].message.content or "{}"
 
         try:
-            return json.loads(raw)
+            data = json.loads(raw)
         except json.JSONDecodeError as e:
             raise NonRetryableError(f"LLM 返回非法 JSON: {e}", cause=e)
+
+        # 用 Pydantic 严格校验：recommended_decision 必须是合法枚举，
+        # confidence 必须在 [0.0, 1.0]，且不允许未知字段。
+        try:
+            suggestion = AISuggestion(**data)
+        except ValidationError as e:
+            raise NonRetryableError(f"LLM 返回结构不合规: {e}", cause=e)
+
+        return suggestion.model_dump()
 
     @staticmethod
     def _fallback_suggest_decision(

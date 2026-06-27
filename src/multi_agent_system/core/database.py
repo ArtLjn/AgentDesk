@@ -602,9 +602,17 @@ class DatabaseManager:
             "decision", "decision_reason", "rewritten_result",
             "reviewer_id", "status", "decided_at",
         }
+        unknown = set(updates.keys()) - allowed
+        if unknown:
+            logger.warning(
+                f"update_review_decision 收到未知字段: {unknown}，将被忽略"
+            )
         set_parts = [f"{k} = ?" for k in updates if k in allowed]
         values = [v for k, v in updates.items() if k in allowed]
         if not set_parts:
+            logger.warning(
+                f"update_review_decision 无有效更新字段, review_id={review_id}"
+            )
             return
         values.append(review_id)
         async with self.connection() as conn:

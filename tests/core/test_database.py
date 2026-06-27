@@ -247,3 +247,122 @@ async def test_human_review_full_crud_flow():
     await manager.close()
     db_path.unlink()
 
+
+@pytest.mark.asyncio
+async def test_update_review_decision_warns_on_unknown_keys(caplog):
+    """update_review_decision 收到未知键时应记录 warning 但不报错。"""
+    import logging
+
+    from loguru import logger as loguru_logger
+
+    # 桥接 loguru -> stdlib logging，使 caplog 能捕获
+    def _sink(message):
+        record = message.record
+        logging.getLogger(record["name"]).log(
+            record["level"].no,
+            record["message"],
+        )
+
+    handler_id = loguru_logger.add(_sink, level="WARNING")
+
+    try:
+        db_path = Path("tests/data/test_hr_unknown.db")
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        if db_path.exists():
+            db_path.unlink()
+
+        manager = DatabaseManager(db_path=str(db_path))
+        await manager.initialize()
+
+        await manager.create_pending_review({
+            "review_id": "HR-U1",
+            "ticket_id": "TK-U1",
+            "trigger_type": "escalate",
+            "trigger_reason": "VIP",
+            "created_at": datetime.now().isoformat(),
+        })
+
+        caplog.set_level(logging.WARNING)
+
+        # 含拼写错误 + 合法字段
+        await manager.update_review_decision("HR-U1", {
+            "decision_reazon": "拼写错误",  # 未知键
+            "decision": "approve",  # 合法
+        })
+
+        # 验证 warning 被记录，包含未知键名
+        messages = [r.getMessage() for r in caplog.records]
+        unknown_warnings = [m for m in messages if "未知字段" in m]
+        assert unknown_warnings, (
+            f"期望 warning 日志包含 '未知字段'，实际 records: {messages}"
+        )
+        assert "decision_reazon" in unknown_warnings[0]
+
+        # 合法字段应该被写入
+        fetched = await manager.get_pending_review_by_ticket("TK-U1")
+        assert fetched["decision"] == "approve"
+        # 拼写错误的字段不应该出现在数据库
+        assert "decision_reazon" not in fetched
+
+        await manager.close()
+        db_path.unlink()
+    finally:
+        loguru_logger.remove(handler_id)
+
+
+@pytest.mark.asyncio
+async def test_update_review_decision_warns_on_no_valid_fields(caplog):
+    """update_review_decision 全部键都非法时记录 warning 并返回 None。"""
+    import logging
+
+    from loguru import logger as loguru_logger
+
+    def _sink(message):
+        record = message.record
+        logging.getLogger(record["name"]).log(
+            record["level"].no,
+            record["message"],
+        )
+
+    handler_id = loguru_logger.add(_sink, level="WARNING")
+
+    try:
+        db_path = Path("tests/data/test_hr_novalid.db")
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        if db_path.exists():
+            db_path.unlink()
+
+        manager = DatabaseManager(db_path=str(db_path))
+        await manager.initialize()
+
+        await manager.create_pending_review({
+            "review_id": "HR-N1",
+            "ticket_id": "TK-N1",
+            "trigger_type": "escalate",
+            "trigger_reason": "VIP",
+            "created_at": datetime.now().isoformat(),
+        })
+
+        caplog.set_level(logging.WARNING)
+
+        # 全部未知键
+        result = await manager.update_review_decision("HR-N1", {
+            "foo": "bar",
+            "baz": "qux",
+        })
+
+        # 返回 None（虽然函数签名是 None，关键是没 raise）
+        assert result is None
+
+        # 验证 warning
+        messages = [r.getMessage() for r in caplog.records]
+        no_valid_warnings = [m for m in messages if "无有效更新字段" in m]
+        assert no_valid_warnings, (
+            f"期望 warning 日志包含 '无有效更新字段'，实际: {messages}"
+        )
+
+        await manager.close()
+        db_path.unlink()
+    finally:
+        loguru_logger.remove(handler_id)
+
