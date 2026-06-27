@@ -433,7 +433,8 @@ class TestGraphSettingsIntegration:
         assert retry_decision(state_below) == "process"
 
         state_at_limit = {"retry_count": 3}
-        assert retry_decision(state_at_limit) == "handle_failure"
+        # Phase 2 起：达上限转入人工审核（trigger_type=review_failed），不再走 handle_failure
+        assert retry_decision(state_at_limit) == "human_review_wait"
 
     @pytest.mark.asyncio
     async def test_classify_node_with_agent_no_try_except(self) -> None:
