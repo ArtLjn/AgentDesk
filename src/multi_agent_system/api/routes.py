@@ -679,16 +679,70 @@ async def _run_workflow(app: Any, ticket_id: str, state: dict) -> None:
         existing = await db_tool.get_ticket(ticket_id) or {}
 
         # 异常兜底：转为 error_fallback 类型人工审核，而非直接 failed
-        await _fallback_to_human_review(
+        # 三级兜底逻辑封装在 _safe_fallback_to_human_review 中，避免异常逸出
+        await _safe_fallback_to_human_review(
             app, ticket_id, current_state, existing, str(e)
         )
 
+
+async def _safe_fallback_to_human_review(
+    app: Any,
+    ticket_id: str,
+    state: dict,
+    existing: dict,
+    error_msg: str,
+) -> None:
+    """三级兜底：确保异常不会从 _run_workflow（asyncio.create_task）静默逸出。
+
+    层级：
+    1. 调用 _fallback_to_human_review 转人工审核
+    2. 第一层失败 -> 标记工单 failed + 广播
+    3. 标记 failed 也失败 -> 仅记录 critical 日志（运维告警）
+    """
+    db_tool = app.state.db_tool
+    fallback_err: Exception | None = None
+
+    # 第一层：转人工审核
+    try:
+        await _fallback_to_human_review(
+            app, ticket_id, state, existing, error_msg
+        )
         await _broadcast_ticket_update(
             ticket_id=ticket_id,
             status="pending_human_review",
-            message=f"处理异常，已转人工审核: {e}",
+            message=f"处理异常，已转人工审核: {error_msg}",
             node="human_review_wait",
             data={"trigger_type": "error_fallback"},
+        )
+        return
+    except Exception as err1:  # noqa: BLE001
+        fallback_err = err1
+        logger.error(
+            f"工单 {ticket_id} 人工审核兜底也失败: {fallback_err}. "
+            f"原始错误: {error_msg}"
+        )
+
+    # 第二层：标记 failed
+    try:
+        combined_error = f"原始错误: {error_msg}; 兜底失败: {fallback_err}"
+        await db_tool.save_ticket({
+            **existing,
+            "ticket_id": ticket_id,
+            "status": "failed",
+            "error": combined_error,
+        })
+        await _broadcast_ticket_update(
+            ticket_id=ticket_id,
+            status="failed",
+            message=f"处理失败且人工审核兜底也失败: {fallback_err}",
+            node="error",
+        )
+        return
+    except Exception as final_err:  # noqa: BLE001
+        # 第三层：彻底失败，只记录日志（防止异常逸出 create_task 被静默吞掉）
+        logger.critical(
+            f"工单 {ticket_id} 完全无法处理: {final_err}. "
+            f"原始: {error_msg}, 兜底: {fallback_err}"
         )
 
 

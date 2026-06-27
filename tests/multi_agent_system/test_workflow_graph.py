@@ -94,7 +94,7 @@ class TestTicketWorkflow:
 
         # retry_count=2 → retry_check 递增到 3，触发 human_review_wait → END
         # 最终状态为 pending_human_review（重试达上限后转人工审核）
-        assert result["status"] in ("completed", "failed", "pending_human_review")
+        assert result["status"] == "pending_human_review"
 
     def test_max_retry_failure(self):
         """超过最大重试次数后转人工审核。"""

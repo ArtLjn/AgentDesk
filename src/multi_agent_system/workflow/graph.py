@@ -613,6 +613,7 @@ async def human_review_wait(state: TicketState) -> dict:
             })
 
         # 3. 创建 pending span
+        # TODO(phase-3): span_type 暂用 "node"，待 core/trace.py 支持 "human_decision" 类型后替换
         async with _span(
             "human_review_wait",
             span_type="node",
@@ -758,6 +759,7 @@ async def _persist_review_decision(
         },
     )
 
+    # TODO(phase-3): span_type 暂用 "node"，待 core/trace.py 支持 "human_decision" 类型后替换
     async with _span(
         "apply_human_decision",
         span_type="node",
