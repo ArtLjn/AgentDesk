@@ -16,7 +16,7 @@ def _build_app() -> FastAPI:
     app = FastAPI()
     app.include_router(router, prefix="/api")
 
-    db_manager = DatabaseManager(db_path=":memory:")
+    db_manager = DatabaseManager(database_url="sqlite+aiosqlite:///:memory:")
     asyncio.run(db_manager.initialize())
 
     app.state.db_manager = db_manager
@@ -225,7 +225,7 @@ def test_submit_decision_not_pending(app: FastAPI, client: TestClient) -> None:
 
 
 def test_submit_decision_rewrite_requires_result(app: FastAPI, client: TestClient) -> None:
-    """rewrite 决策缺 rewritten_result -> 400。"""
+    """rewrite 决策缺 rewritten_result -> 422（Pydantic model_validator 校验失败）。"""
     _seed_ticket(app, "TK-D3")
     resp = client.post(
         "/api/reviews/TK-D3/decision",
@@ -235,14 +235,16 @@ def test_submit_decision_rewrite_requires_result(app: FastAPI, client: TestClien
             "reviewer_id": "r1",
         },
     )
-    assert resp.status_code == 400
-    assert "REWRITE_RESULT_REQUIRED" in resp.json()["detail"]
+    assert resp.status_code == 422
+    # Pydantic v2 结构化错误：detail 是 list[dict]，错误消息嵌在 msg 字段
+    detail_text = str(resp.json()["detail"])
+    assert "REWRITE_RESULT_REQUIRED" in detail_text
 
 
 def test_submit_decision_empty_reason(
     app: FastAPI, client: TestClient
 ) -> None:
-    """空 decision_reason -> 400。"""
+    """空 decision_reason -> 422（Pydantic model_validator 校验失败）。"""
     _seed_ticket(app, "TK-D4")
     resp = client.post(
         "/api/reviews/TK-D4/decision",
@@ -252,8 +254,9 @@ def test_submit_decision_empty_reason(
             "reviewer_id": "r1",
         },
     )
-    assert resp.status_code == 400
-    assert "DECISION_REASON_REQUIRED" in resp.json()["detail"]
+    assert resp.status_code == 422
+    detail_text = str(resp.json()["detail"])
+    assert "DECISION_REASON_REQUIRED" in detail_text
 
 
 def test_submit_decision_approve_success(app: FastAPI, client: TestClient) -> None:

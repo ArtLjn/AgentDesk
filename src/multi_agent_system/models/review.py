@@ -3,7 +3,7 @@
 from datetime import datetime
 from enum import Enum
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 __all__ = [
     "AISuggestion",
@@ -96,6 +96,19 @@ class ReviewDecisionRequest(BaseModel):
     decision_reason: str  # 必填
     rewritten_result: str | None = None  # decision=rewrite 时必填
     reviewer_id: str  # 必填
+
+    @model_validator(mode="after")
+    def _validate_decision_fields(self) -> "ReviewDecisionRequest":
+        """跨字段校验：reason 非空白；rewrite 时 rewritten_result 必填。"""
+        reason = (self.decision_reason or "").strip()
+        if not reason:
+            raise ValueError("DECISION_REASON_REQUIRED: decision_reason 不能为空")
+        if self.decision == ReviewDecision.REWRITE:
+            if not (self.rewritten_result or "").strip():
+                raise ValueError(
+                    "REWRITE_RESULT_REQUIRED: decision=rewrite 时必须提供 rewritten_result"
+                )
+        return self
 
 
 class ReviewStats(BaseModel):

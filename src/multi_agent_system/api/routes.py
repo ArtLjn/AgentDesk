@@ -14,6 +14,7 @@ from src.multi_agent_system.models.ticket import (
     TicketCreate,
     TicketResponse,
 )
+from src.multi_agent_system.models.review import ReviewDecisionRequest
 from src.multi_agent_system.workflow.graph import create_initial_state
 
 __all__ = ["router"]
@@ -546,14 +547,10 @@ async def get_review_detail(ticket_id: str, request: Request) -> dict:
 @router.post("/reviews/{ticket_id}/decision", response_model=dict)
 async def submit_review_decision(
     ticket_id: str,
-    body: dict[str, Any],
+    body: ReviewDecisionRequest,
     request: Request,
 ) -> dict:
     """提交人工审核决策，恢复工作流执行。"""
-    from src.multi_agent_system.models.review import (
-        ReviewDecision,
-        ReviewDecisionRequest,
-    )
     from src.multi_agent_system.workflow.graph import resume_from_human_decision
 
     app = request.app
@@ -571,26 +568,11 @@ async def submit_review_decision(
             detail=f"工单 {ticket_id} 不在待审核状态（当前状态: {ticket.get('status')}）",
         )
 
-    # 3. Pydantic 模型校验
-    try:
-        req = ReviewDecisionRequest(**body)
-    except Exception as e:  # noqa: BLE001
-        raise HTTPException(status_code=422, detail=str(e)) from e
+    # 3. 跨字段校验已由 ReviewDecisionRequest.@model_validator 完成
+    #    FastAPI 在 Pydantic 校验失败时统一返回 422 + 结构化错误
+    req = body
 
-    # 4. 跨字段校验：rewrite 时 rewritten_result 必填
-    if req.decision == ReviewDecision.REWRITE and not req.rewritten_result:
-        raise HTTPException(
-            status_code=400,
-            detail="REWRITE_RESULT_REQUIRED: decision=rewrite 时必须提供 rewritten_result",
-        )
-    # decision_reason 不能为空字符串
-    if not (req.decision_reason or "").strip():
-        raise HTTPException(
-            status_code=400,
-            detail="DECISION_REASON_REQUIRED: decision_reason 不能为空",
-        )
-
-    # 5. 幂等性：已 decided 的工单不允许再次提交
+    # 4. 幂等性：已 decided 的工单不允许再次提交
     db_manager = app.state.db_manager
     pending = await db_manager.get_pending_review_by_ticket(ticket_id)
     if pending and pending.get("status") == "decided":
@@ -970,19 +952,9 @@ async def _run_workflow(app: Any, ticket_id: str, state: dict) -> None:
                             "review_id": review_payload.get("review_id"),
                         },
                     )
-
-                # 人工决策已提交事件（resume_from_human_decision 流式处理时触发）
-                if node_output.get("__review_decided__"):
-                    decision_info = node_output.get("__human_decision__") or {}
-                    await _broadcast_review_event(
-                        "review_decided",
-                        ticket_id,
-                        {
-                            "decision": decision_info.get("decision"),
-                            "reviewer_id": decision_info.get("reviewer_id"),
-                            "next_node": node_output.get("__next_node__"),
-                        },
-                    )
+                # 注：__review_decided__ marker 仅在 resume_from_human_decision
+                # 子图中设置，本 _run_workflow 流处理器只跑初始流程不会看到该 marker。
+                # review_decided 事件由 submit_review_decision 端点直接广播。
 
     except Exception as e:
         logger.error(f"工单处理异常: {ticket_id}, 错误: {e}")
