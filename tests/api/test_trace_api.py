@@ -1,7 +1,7 @@
 """Trace API 端点测试。"""
 
-import asyncio
 import time
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -10,36 +10,44 @@ from fastapi.testclient import TestClient
 
 from src.multi_agent_system.api.routes import router
 from src.multi_agent_system.core.database import DatabaseManager
+from tests.conftest import TEST_DATABASE_URL
 
 
-@pytest.fixture
-def app():
-    """构建测试用 FastAPI 应用。"""
-    app = FastAPI()
+def _build_app() -> FastAPI:
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        db_manager = DatabaseManager(database_url=TEST_DATABASE_URL)
+        await db_manager.initialize()
+        await db_manager.truncate_all()
+        app.state.db_manager = db_manager
+        app.state.db_tool = MagicMock()
+        app.state.db_tool.save_ticket = AsyncMock()
+        app.state.db_tool.get_ticket = AsyncMock(return_value=None)
+        app.state.notification_tool = MagicMock()
+        app.state.analytics_tool = MagicMock()
+        app.state.knowledge_tool = None
+        app.state.memory_manager = None
+        app.state.tool_registry = None
+        app.state.workflow = MagicMock()
+        app.state.trace_manager = None
+        yield
+        await db_manager.close()
+
+    app = FastAPI(lifespan=lifespan)
     app.include_router(router, prefix="/api")
-
-    db_manager = DatabaseManager(db_path=":memory:")
-    asyncio.run(db_manager.initialize())
-
-    app.state.db_manager = db_manager
-    app.state.db_tool = MagicMock()
-    app.state.db_tool.save_ticket = AsyncMock()
-    app.state.db_tool.get_ticket = AsyncMock(return_value=None)
-    app.state.notification_tool = MagicMock()
-    app.state.analytics_tool = MagicMock()
-    app.state.knowledge_tool = None
-    app.state.memory_manager = None
-    app.state.tool_registry = None
-    app.state.workflow = MagicMock()
-    app.state.trace_manager = None
-
     return app
 
 
 @pytest.fixture
-def client(app):
-    """创建 TestClient 实例。"""
-    return TestClient(app)
+def app():
+    return _build_app()
+
+
+@pytest.fixture
+def client(app) -> TestClient:
+    with TestClient(app) as c:
+        app.state._portal = c.portal
+        yield c
 
 
 class TestTraceAPI:
@@ -70,15 +78,15 @@ class TestTraceAPI:
         """创建 trace + span 后查询。"""
         db: DatabaseManager = app.state.db_manager
         now = time.time()
-        asyncio.run(db.save_trace({
+        app.state._portal.call(db.save_trace, {
             "trace_id": "tr-test", "ticket_id": "TK-001", "status": "completed",
             "start_time": now - 1, "end_time": now, "duration": 1.0,
-        }))
-        asyncio.run(db.save_span({
+        })
+        app.state._portal.call(db.save_span, {
             "span_id": "sp-1", "trace_id": "tr-test", "parent_span_id": None,
             "span_type": "node", "name": "classify", "status": "ok",
             "start_time": now - 0.5, "end_time": now, "duration": 0.5,
-        }))
+        })
 
         resp = client.get("/api/tickets/TK-001/trace")
         assert resp.status_code == 200
@@ -90,7 +98,7 @@ class TestTraceAPI:
     def test_list_traces_with_data(self, client: TestClient, app):
         """有 trace 数据时返回列表。"""
         db: DatabaseManager = app.state.db_manager
-        asyncio.run(db.save_ticket({
+        app.state._portal.call(db.save_ticket, {
             "ticket_id": "TK-001",
             "content": "系统登录失败，需要排查",
             "category": "technical",
@@ -98,11 +106,11 @@ class TestTraceAPI:
             "processing_result": "建议检查账号状态并重置密码",
             "references": ["登录故障手册"],
             "status": "completed",
-        }))
-        asyncio.run(db.save_trace({
+        })
+        app.state._portal.call(db.save_trace, {
             "trace_id": "tr-1", "ticket_id": "TK-001", "status": "completed",
             "start_time": time.time(),
-        }))
+        })
         resp = client.get("/api/traces")
         assert resp.status_code == 200
         data = resp.json()
@@ -118,8 +126,8 @@ class TestTraceAPI:
         """按 status 过滤 trace 列表。"""
         db: DatabaseManager = app.state.db_manager
         now = time.time()
-        asyncio.run(db.save_trace({"trace_id": "tr-1", "ticket_id": "TK-1", "status": "completed", "start_time": now - 1}))
-        asyncio.run(db.save_trace({"trace_id": "tr-2", "ticket_id": "TK-2", "status": "running", "start_time": now}))
+        app.state._portal.call(db.save_trace, {"trace_id": "tr-1", "ticket_id": "TK-1", "status": "completed", "start_time": now - 1})
+        app.state._portal.call(db.save_trace, {"trace_id": "tr-2", "ticket_id": "TK-2", "status": "running", "start_time": now})
 
         resp = client.get("/api/traces?status=completed")
         assert resp.status_code == 200
@@ -132,12 +140,12 @@ class TestTraceAPI:
         db: DatabaseManager = app.state.db_manager
         now = time.time()
         for index in range(3):
-            asyncio.run(db.save_trace({
+            app.state._portal.call(db.save_trace, {
                 "trace_id": f"tr-{index}",
                 "ticket_id": f"TK-{index}",
                 "status": "completed",
                 "start_time": now - index,
-            }))
+            })
 
         resp = client.get("/api/traces?limit=2&offset=1")
         assert resp.status_code == 200

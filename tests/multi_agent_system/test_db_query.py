@@ -1,27 +1,21 @@
 import pytest
 import pytest_asyncio
-from pathlib import Path
 
 from src.multi_agent_system.core.database import DatabaseManager
 from src.multi_agent_system.tools.db_query import DBQueryTool
+from tests.conftest import TEST_DATABASE_URL
 
 
 @pytest_asyncio.fixture
 async def db_tool():
-    db_path = Path("tests/data/test_db_tool.db")
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    if db_path.exists():
-        db_path.unlink()
-
-    db_manager = DatabaseManager(db_path=str(db_path))
+    db_manager = DatabaseManager(database_url=TEST_DATABASE_URL)
     await db_manager.initialize()
+    await db_manager.truncate_all()
 
     tool = DBQueryTool(db_manager=db_manager)
     yield tool
 
     await db_manager.close()
-    if db_path.exists():
-        db_path.unlink()
 
 
 @pytest.mark.asyncio

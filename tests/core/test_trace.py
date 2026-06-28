@@ -7,6 +7,7 @@ import pytest
 
 from src.multi_agent_system.core.database import DatabaseManager
 from src.multi_agent_system.core.trace import TraceManager
+from tests.conftest import TEST_DATABASE_URL
 
 
 class TestTraceDatabase:
@@ -15,8 +16,9 @@ class TestTraceDatabase:
     @pytest.mark.asyncio
     async def test_save_and_get_trace(self):
         """保存 trace 并按 ticket_id 查询。"""
-        db = DatabaseManager(db_path=":memory:")
+        db = DatabaseManager(database_url=TEST_DATABASE_URL)
         await db.initialize()
+        await db.truncate_all()
 
         trace_data = {
             "trace_id": "tr-001",
@@ -34,8 +36,9 @@ class TestTraceDatabase:
     @pytest.mark.asyncio
     async def test_list_traces_with_filter(self):
         """按 status 过滤 trace 列表。"""
-        db = DatabaseManager(db_path=":memory:")
+        db = DatabaseManager(database_url=TEST_DATABASE_URL)
         await db.initialize()
+        await db.truncate_all()
 
         now = time.time()
         await db.save_trace({"trace_id": "tr-1", "ticket_id": "TK-1", "status": "completed", "start_time": now - 1})
@@ -48,8 +51,9 @@ class TestTraceDatabase:
     @pytest.mark.asyncio
     async def test_save_and_get_spans(self):
         """保存 span 并查询。"""
-        db = DatabaseManager(db_path=":memory:")
+        db = DatabaseManager(database_url=TEST_DATABASE_URL)
         await db.initialize()
+        await db.truncate_all()
 
         await db.save_trace({"trace_id": "tr-001", "ticket_id": "TK-001", "status": "running", "start_time": time.time()})
         await db.save_span({
@@ -65,8 +69,9 @@ class TestTraceDatabase:
     @pytest.mark.asyncio
     async def test_update_span(self):
         """更新 span 的 end_time 和 duration。"""
-        db = DatabaseManager(db_path=":memory:")
+        db = DatabaseManager(database_url=TEST_DATABASE_URL)
         await db.initialize()
+        await db.truncate_all()
 
         await db.save_trace({"trace_id": "tr-001", "ticket_id": "TK-001", "status": "running", "start_time": time.time()})
         await db.save_span({
@@ -82,8 +87,9 @@ class TestTraceDatabase:
     @pytest.mark.asyncio
     async def test_nested_spans(self):
         """嵌套 span 的 parent_span_id 关系正确。"""
-        db = DatabaseManager(db_path=":memory:")
+        db = DatabaseManager(database_url=TEST_DATABASE_URL)
         await db.initialize()
+        await db.truncate_all()
 
         await db.save_trace({"trace_id": "tr-001", "ticket_id": "TK-001", "status": "running", "start_time": time.time()})
         await db.save_span({
@@ -104,8 +110,9 @@ class TestTraceDatabase:
     @pytest.mark.asyncio
     async def test_get_trace_stats(self):
         """trace 耗时统计按 span_type 聚合。"""
-        db = DatabaseManager(db_path=":memory:")
+        db = DatabaseManager(database_url=TEST_DATABASE_URL)
         await db.initialize()
+        await db.truncate_all()
 
         now = time.time()
         await db.save_trace({
@@ -138,8 +145,9 @@ class TestTraceManager:
         """trace 完整生命周期。"""
         from src.multi_agent_system.core.trace import current_trace_id
 
-        db = DatabaseManager(db_path=":memory:")
+        db = DatabaseManager(database_url=TEST_DATABASE_URL)
         await db.initialize()
+        await db.truncate_all()
 
         manager = TraceManager(db)
         trace_id = await manager.start_trace("TK-001")
@@ -158,8 +166,9 @@ class TestTraceManager:
     @pytest.mark.asyncio
     async def test_span_context_manager(self):
         """span 自动记录耗时。"""
-        db = DatabaseManager(db_path=":memory:")
+        db = DatabaseManager(database_url=TEST_DATABASE_URL)
         await db.initialize()
+        await db.truncate_all()
 
         manager = TraceManager(db)
         trace_id = await manager.start_trace("TK-001")
@@ -179,8 +188,9 @@ class TestTraceManager:
     @pytest.mark.asyncio
     async def test_nested_spans(self):
         """嵌套 span 的 parent 关系正确。"""
-        db = DatabaseManager(db_path=":memory:")
+        db = DatabaseManager(database_url=TEST_DATABASE_URL)
         await db.initialize()
+        await db.truncate_all()
 
         manager = TraceManager(db)
         trace_id = await manager.start_trace("TK-001")
@@ -201,8 +211,9 @@ class TestTraceManager:
     @pytest.mark.asyncio
     async def test_span_captures_exception(self):
         """span 内异常自动标记 error。"""
-        db = DatabaseManager(db_path=":memory:")
+        db = DatabaseManager(database_url=TEST_DATABASE_URL)
         await db.initialize()
+        await db.truncate_all()
 
         manager = TraceManager(db)
         trace_id = await manager.start_trace("TK-001")
@@ -224,8 +235,9 @@ class TestTraceManager:
         """无活跃 trace 时返回 no-op span，不报错。"""
         from src.multi_agent_system.core.trace import current_trace_id
 
-        db = DatabaseManager(db_path=":memory:")
+        db = DatabaseManager(database_url=TEST_DATABASE_URL)
         await db.initialize()
+        await db.truncate_all()
 
         manager = TraceManager(db)
         current_trace_id.set(None)
@@ -241,8 +253,9 @@ class TestTraceManager:
     @pytest.mark.asyncio
     async def test_node_and_tool_count(self):
         """node_count 和 total_tool_calls 自动递增。"""
-        db = DatabaseManager(db_path=":memory:")
+        db = DatabaseManager(database_url=TEST_DATABASE_URL)
         await db.initialize()
+        await db.truncate_all()
 
         manager = TraceManager(db)
         trace_id = await manager.start_trace("TK-001")

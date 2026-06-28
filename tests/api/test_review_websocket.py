@@ -5,7 +5,7 @@
 - review_decided:   审核员提交决策后广播
 """
 
-import asyncio
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -18,39 +18,46 @@ from src.multi_agent_system.api.routes import (
     router,
 )
 from src.multi_agent_system.core.database import DatabaseManager
+from tests.conftest import TEST_DATABASE_URL
 
 
 def _build_app() -> FastAPI:
-    """构建测试用 FastAPI 应用，使用内存 SQLite。"""
-    app = FastAPI()
+    """构建测试用 FastAPI 应用，db_manager 在 lifespan 内创建。"""
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        db_manager = DatabaseManager(database_url=TEST_DATABASE_URL)
+        await db_manager.initialize()
+        await db_manager.truncate_all()
+        app.state.db_manager = db_manager
+        db_tool = MagicMock()
+        db_tool.save_ticket = AsyncMock()
+        db_tool.get_ticket = AsyncMock(return_value=None)
+        app.state.db_tool = db_tool
+        app.state.coordinator = None
+        app.state.analytics_tool = MagicMock()
+        app.state.knowledge_tool = None
+        app.state.memory_manager = None
+        app.state.tool_registry = None
+        app.state.workflow = MagicMock()
+        app.state.trace_manager = None
+        yield
+        await db_manager.close()
+
+    app = FastAPI(lifespan=lifespan)
     app.include_router(router, prefix="/api")
-
-    db_manager = DatabaseManager(db_path=":memory:")
-    asyncio.run(db_manager.initialize())
-
-    app.state.db_manager = db_manager
-    db_tool = MagicMock()
-    db_tool.save_ticket = AsyncMock()
-    db_tool.get_ticket = AsyncMock(return_value=None)
-    app.state.db_tool = db_tool
-    app.state.coordinator = None
-    app.state.analytics_tool = MagicMock()
-    app.state.knowledge_tool = None
-    app.state.memory_manager = None
-    app.state.tool_registry = None
-    app.state.workflow = MagicMock()
-    app.state.trace_manager = None
     return app
 
 
 @pytest.fixture
-def app() -> FastAPI:
+def app():
     return _build_app()
 
 
 @pytest.fixture
 def client(app) -> TestClient:
-    return TestClient(app)
+    with TestClient(app) as c:
+        app.state._portal = c.portal
+        yield c
 
 
 @pytest.fixture(autouse=True)
@@ -76,21 +83,21 @@ def _seed_ticket(app: FastAPI, ticket_id: str, **overrides) -> dict:
         "created_at": "2026-06-27T10:00:00",
     }
     ticket.update(overrides)
-    asyncio.run(app.state.db_manager.save_ticket(ticket))
+    app.state._portal.call(app.state.db_manager.save_ticket, ticket)
     app.state.db_tool.get_ticket = AsyncMock(return_value=ticket)
     return ticket
 
 
 def _seed_review(app: FastAPI, review_id: str, ticket_id: str) -> dict:
     """写入一条 pending human_reviews 记录。"""
-    asyncio.run(app.state.db_manager.create_pending_review({
+    app.state._portal.call(app.state.db_manager.create_pending_review, {
         "review_id": review_id,
         "ticket_id": ticket_id,
         "trigger_type": "escalate",
         "trigger_reason": "投诉类工单",
         "ai_suggestion": None,
         "created_at": "2026-06-27T10:00:00",
-    }))
+    })
 
 
 # ============================================================

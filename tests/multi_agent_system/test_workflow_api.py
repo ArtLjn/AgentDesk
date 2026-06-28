@@ -4,6 +4,7 @@
 通过 mock 外部依赖（workflow、知识库工具）隔离 API 层逻辑。
 """
 
+from contextlib import asynccontextmanager
 from datetime import datetime
 from unittest.mock import MagicMock, patch
 
@@ -16,6 +17,7 @@ from src.multi_agent_system.config import Settings
 from src.multi_agent_system.core.database import DatabaseManager
 from src.multi_agent_system.tools.analytics import AnalyticsTool
 from src.multi_agent_system.tools.db_query import DBQueryTool
+from tests.conftest import TEST_DATABASE_URL
 
 
 class _FakeWorkflow:
@@ -34,36 +36,35 @@ class _FakeWorkflow:
 
 @pytest.fixture
 def app():
-    """构建测试用 FastAPI 应用，mock 掉所有外部依赖。"""
-    app = FastAPI()
-    app.include_router(router, prefix="/api")
+    """构建测试用 FastAPI 应用，db_manager 在 lifespan 内创建。"""
+    @asynccontextmanager
+    async def lifespan(application: FastAPI):
+        db_manager = DatabaseManager(database_url=TEST_DATABASE_URL)
+        await db_manager.initialize()
+        await db_manager.truncate_all()
+        db_tool = DBQueryTool(db_manager=db_manager)
+        analytics_tool = AnalyticsTool(db_manager=db_manager)
+        mock_knowledge_tool = MagicMock()
+        application.state.db_manager = db_manager
+        application.state.db_tool = db_tool
+        application.state.settings = Settings()
+        application.state.workflow = _FakeWorkflow()
+        application.state.knowledge_tool = mock_knowledge_tool
+        application.state.analytics_tool = analytics_tool
+        yield
+        await db_manager.close()
 
-    # 初始化工具（使用内存 SQLite 数据库，每个 fixture 独立）
-    db_manager = DatabaseManager(db_path=":memory:")
-    import asyncio
-    asyncio.run(db_manager.initialize())
-
-    db_tool = DBQueryTool(db_manager=db_manager)
-    analytics_tool = AnalyticsTool(db_manager=db_manager)
-
-    # mock 知识库工具
-    mock_knowledge_tool = MagicMock()
-
-    # 注入到 app.state（模拟 lifespan 中初始化的依赖）
-    app.state.db_manager = db_manager
-    app.state.db_tool = db_tool
-    app.state.settings = Settings()
-    app.state.workflow = _FakeWorkflow()
-    app.state.knowledge_tool = mock_knowledge_tool
-    app.state.analytics_tool = analytics_tool
-
-    return app
+    application = FastAPI(lifespan=lifespan)
+    application.include_router(router, prefix="/api")
+    return application
 
 
 @pytest.fixture
 def client(app):
-    """创建 TestClient 实例。"""
-    return TestClient(app)
+    """创建 TestClient 实例，with 触发 lifespan。"""
+    with TestClient(app) as c:
+        app.state._portal = c.portal
+        yield c
 
 
 class TestTicketAPI:
@@ -93,15 +94,13 @@ class TestTicketAPI:
 
     def test_get_ticket(self, client):
         """GET /api/tickets/{id} 查询工单详情。"""
-        import asyncio
-
         ticket_id = "T-QUERY-001"
-        asyncio.run(client.app.state.db_tool.save_ticket({
+        client.app.state._portal.call(client.app.state.db_tool.save_ticket, {
             "ticket_id": ticket_id,
             "content": "查询测试",
             "status": "completed",
             "references": ["测试知识库片段"],
-        }))
+        })
 
         # 通过 API 查询
         response = client.get(f"/api/tickets/{ticket_id}")
@@ -137,15 +136,14 @@ class TestTicketAPI:
         ticket_id = create_resp.json()["ticket_id"]
 
         # 直接修改数据库中的状态为 completed
-        import asyncio
         db_tool = client.app.state.db_tool
-        asyncio.run(db_tool.save_ticket({
+        client.app.state._portal.call(db_tool.save_ticket, {
             "ticket_id": ticket_id,
             "content": "已完成工单",
             "status": "completed",
             "category": "technical",
             "created_at": datetime.now().isoformat(),
-        }))
+        })
 
         response = client.get("/api/tickets?status=completed")
 
@@ -155,22 +153,21 @@ class TestTicketAPI:
 
     def test_list_tickets_with_category_filter(self, client):
         """GET /api/tickets?category=technical 按分类过滤。"""
-        import asyncio
         db_tool = client.app.state.db_tool
-        asyncio.run(db_tool.save_ticket({
+        client.app.state._portal.call(db_tool.save_ticket, {
             "ticket_id": "T020",
             "content": "技术工单",
             "status": "completed",
             "category": "technical",
             "created_at": datetime.now().isoformat(),
-        }))
-        asyncio.run(db_tool.save_ticket({
+        })
+        client.app.state._portal.call(db_tool.save_ticket, {
             "ticket_id": "T021",
             "content": "账务工单",
             "status": "completed",
             "category": "billing",
             "created_at": datetime.now().isoformat(),
-        }))
+        })
 
         response = client.get("/api/tickets?category=technical")
 
@@ -249,9 +246,8 @@ class TestAnalyticsAPI:
 
     def test_analytics(self, client):
         """GET /api/analytics 返回统计数据。"""
-        import asyncio
         db_tool = client.app.state.db_tool
-        asyncio.run(db_tool.save_ticket({
+        client.app.state._portal.call(db_tool.save_ticket, {
             "ticket_id": "A001",
             "content": "技术问题",
             "category": "technical",
@@ -260,7 +256,7 @@ class TestAnalyticsAPI:
             "review_score": 0.9,
             "retry_count": 0,
             "created_at": datetime.now().isoformat(),
-        }))
+        })
 
         response = client.get("/api/analytics")
 

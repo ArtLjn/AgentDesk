@@ -1,6 +1,6 @@
 """人工审核工作台 API 端点测试。"""
 
-import asyncio
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -9,44 +9,55 @@ from fastapi.testclient import TestClient
 
 from src.multi_agent_system.api.routes import router
 from src.multi_agent_system.core.database import DatabaseManager
+from tests.conftest import TEST_DATABASE_URL
+
+
+def _run(client: TestClient, fn, *args, **kwargs):
+    """在 TestClient 的 portal 内同步调用 async 函数（避免跨 event loop）。"""
+    return client.portal.call(fn, *args, **kwargs)
 
 
 def _build_app() -> FastAPI:
-    """构建测试用 FastAPI 应用，使用内存 SQLite。"""
-    app = FastAPI()
+    """构建测试用 FastAPI 应用，db_manager 在 lifespan 内创建（绑定 TestClient 的 loop）。"""
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        db_manager = DatabaseManager(database_url=TEST_DATABASE_URL)
+        await db_manager.initialize()
+        await db_manager.truncate_all()
+        app.state.db_manager = db_manager
+        app.state.db_tool = MagicMock()
+        app.state.db_tool.save_ticket = AsyncMock()
+        app.state.db_tool.get_ticket = AsyncMock(return_value=None)
+        app.state.coordinator = None
+        app.state.analytics_tool = MagicMock()
+        app.state.knowledge_tool = None
+        app.state.memory_manager = None
+        app.state.tool_registry = None
+        app.state.workflow = MagicMock()
+        app.state.trace_manager = None
+        yield
+        await db_manager.close()
+
+    app = FastAPI(lifespan=lifespan)
     app.include_router(router, prefix="/api")
-
-    db_manager = DatabaseManager(database_url="sqlite+aiosqlite:///:memory:")
-    asyncio.run(db_manager.initialize())
-
-    app.state.db_manager = db_manager
-    db_tool = MagicMock()
-    db_tool.save_ticket = AsyncMock()
-    db_tool.get_ticket = AsyncMock(return_value=None)
-    app.state.db_tool = db_tool
-    app.state.coordinator = None
-    app.state.analytics_tool = MagicMock()
-    app.state.knowledge_tool = None
-    app.state.memory_manager = None
-    app.state.tool_registry = None
-    app.state.workflow = MagicMock()
-    app.state.trace_manager = None
-
     return app
 
 
 @pytest.fixture
-def app() -> FastAPI:
+def app():
     return _build_app()
 
 
 @pytest.fixture
 def client(app) -> TestClient:
-    return TestClient(app)
+    """用 with 触发 lifespan 让 db_manager 在 portal 的 loop 内创建。"""
+    with TestClient(app) as c:
+        app.state._portal = c.portal
+        yield c
 
 
 def _seed_ticket(app: FastAPI, ticket_id: str, **overrides) -> dict:
-    """写入一条工单记录到测试 DB。"""
+    """写入一条工单记录到测试 DB（在 TestClient 的 portal loop 内执行）。"""
     ticket = {
         "ticket_id": ticket_id,
         "content": "我对昨天购买的商品非常不满意，要求退款" * 5,
@@ -60,7 +71,7 @@ def _seed_ticket(app: FastAPI, ticket_id: str, **overrides) -> dict:
         "created_at": "2026-06-27T10:00:00",
     }
     ticket.update(overrides)
-    asyncio.run(app.state.db_manager.save_ticket(ticket))
+    app.state._portal.call(app.state.db_manager.save_ticket, ticket)
     # 让 db_tool.get_ticket 也返回同一份数据
     app.state.db_tool.get_ticket = AsyncMock(return_value=ticket)
     return ticket
@@ -90,9 +101,10 @@ def _seed_review(app: FastAPI, review_id: str, ticket_id: str, **overrides) -> d
     decision = review.pop("decision", None)
     reviewer_id = review.pop("reviewer_id", None)
     decided_at = review.pop("decided_at", None)
-    asyncio.run(app.state.db_manager.create_pending_review(review))
+    app.state._portal.call(app.state.db_manager.create_pending_review, review)
     if final_status == "decided":
-        asyncio.run(app.state.db_manager.update_review_decision(
+        app.state._portal.call(
+            app.state.db_manager.update_review_decision,
             review_id,
             {
                 "status": "decided",
@@ -100,7 +112,7 @@ def _seed_review(app: FastAPI, review_id: str, ticket_id: str, **overrides) -> d
                 "reviewer_id": reviewer_id,
                 "decided_at": decided_at or "2026-06-27T11:00:00",
             },
-        ))
+        )
     return review
 
 
@@ -427,8 +439,8 @@ def test_feedback_satisfied_does_not_create_review(
             json={"satisfied": True},
         )
     assert resp.status_code == 200
-    pending = asyncio.run(
-        app.state.db_manager.get_pending_review_by_ticket("TK-FB1")
+    pending = app.state._portal.call(
+        app.state.db_manager.get_pending_review_by_ticket, "TK-FB1"
     )
     assert pending is None
 
@@ -447,8 +459,8 @@ def test_feedback_dissatisfied_creates_user_request_review(
             json={"satisfied": False},
         )
     assert resp.status_code == 200
-    pending = asyncio.run(
-        app.state.db_manager.get_pending_review_by_ticket("TK-FB2")
+    pending = app.state._portal.call(
+        app.state.db_manager.get_pending_review_by_ticket, "TK-FB2"
     )
     assert pending is not None
     assert pending["trigger_type"] == "user_request"

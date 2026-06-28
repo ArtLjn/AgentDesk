@@ -28,6 +28,7 @@ from fastapi.testclient import TestClient
 from src.multi_agent_system.api.routes import router
 from src.multi_agent_system.core.database import DatabaseManager
 from src.multi_agent_system.tools.db_query import DBQueryTool
+from tests.conftest import TEST_DATABASE_URL
 from src.multi_agent_system.workflow import graph as graph_module
 from src.multi_agent_system.workflow.graph import (
     build_ticket_graph,
@@ -64,8 +65,9 @@ def e2e_app() -> FastAPI:
     app = FastAPI()
     app.include_router(router, prefix="/api")
 
-    db_manager = DatabaseManager(database_url="sqlite+aiosqlite:///:memory:")
+    db_manager = DatabaseManager(database_url=TEST_DATABASE_URL)
     asyncio.run(db_manager.initialize())
+    asyncio.run(db_manager.truncate_all())
 
     app.state.db_manager = db_manager
     app.state.db_tool = DBQueryTool(db_manager=db_manager)

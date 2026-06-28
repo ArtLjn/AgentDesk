@@ -1,27 +1,21 @@
 import pytest
 import pytest_asyncio
-from pathlib import Path
 
 from src.multi_agent_system.core.database import DatabaseManager
 from src.multi_agent_system.core.evaluation import EvaluationCollector
+from tests.conftest import TEST_DATABASE_URL
 
 
 @pytest_asyncio.fixture
 async def eval_collector():
-    db_path = Path("tests/data/test_eval.db")
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    if db_path.exists():
-        db_path.unlink()
-
-    db_manager = DatabaseManager(db_path=str(db_path))
+    db_manager = DatabaseManager(database_url=TEST_DATABASE_URL)
     await db_manager.initialize()
+    await db_manager.truncate_all()
 
     collector = EvaluationCollector(db_manager=db_manager)
     yield collector
 
     await db_manager.close()
-    if db_path.exists():
-        db_path.unlink()
 
 
 @pytest.mark.asyncio
