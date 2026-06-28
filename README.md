@@ -43,12 +43,24 @@ src/multi_agent_system/
 - **四 Agent 协同**：分类 Agent（智能路由）、处理 Agent（RAG 增强）、审核 Agent（质量把关）、协调 Agent（全局调度）
 - **人工审核工作台**：AI 处理不确定时挂起工单，由审核员四选一决策（通过 / 改写 / 重处理 / 驳回），CoordinatorAgent 提供辅助决策建议，全程留痕
 - **智能降级机制**：LLM 调用失败时自动降级到关键词匹配/默认策略
+- **RAG 稳定检索**：ProcessorAgent 会对工单预检索知识库，embedding 异常时自动改用关键词兜底检索
 - **模型路由**：按任务类型（classify/process/review）自动选择不同模型
 - **LLM 结果缓存**：LRU + TTL 缓存，减少重复 Token 消耗
 - **Prometheus 监控**：HTTP/Agent/LLM/缓存全链路指标，Grafana 可视化
-- **分布式追踪**：Span 树结构，记录每个 Agent 的执行轨迹与耗时
+- **分布式追踪与决策链**：Span 树结构记录 Agent 执行轨迹、LLM 输入输出、工具调用、Token 用量和关键决策点
 - **WebSocket 实时推送**：工单处理状态实时同步到前端
-- **知识库检索**：基于 Qdrant 向量检索增强 Agent 处理能力
+- **知识库检索**：基于 Qdrant 向量检索增强 Agent 处理能力，工单详情中的知识库参考可跳转回知识库页面核对原文
+
+## 前端页面
+
+前端是一个面向演示和运维的管理端，覆盖工单处理闭环的主要视图：
+
+- **Dashboard**：展示工单总览、成功率、平均耗时、待处理风险、人工审核压力和近期工单。
+- **工单管理**：支持结构化提交工单、筛选搜索、分页浏览和进入详情页。
+- **工单详情**：展示工单内容、处理结果、知识库参考、Agent 消息链和执行决策链。
+- **审核工作台**：人工处理待审核工单，并查看 AI 辅助建议。
+- **Agent 监控**：查看 trace 列表、Span 时间线、节点输入输出、RAG 命中、Token 用量和决策点。
+- **知识库**：上传文档、查看 Qdrant 文档分块、按标题/分类/内容检索，并支持从工单参考跳转定位。
 
 ## 人工审核工作台
 
@@ -59,6 +71,24 @@ src/multi_agent_system/
 - **四种决策**：通过（沿用 AI 结果）/ 改写（覆盖结果）/ 重处理（清空 retry 重新跑）/ 驳回
 - **WebSocket 实时推送**：新工单进入队列时即时刷新
 - **指标追踪**：AI 建议采纳率（ai_adoption_rate）、平均决策时长等统计可视化
+
+## 决策链与 RAG 追踪
+
+系统会在关键节点写入结构化 trace，用于解释 Agent 为什么这样处理：
+
+- **分类决策**：记录候选分类、选中分类、置信度和理由。
+- **审核决策**：记录审核分数、阈值、通过或重试选择。
+- **重试边界**：记录 retry 与人工升级之间的阈值判断。
+- **LLM 调用**：记录模型、任务类型、消息摘要、输出内容、finish_reason 和 Token 用量。
+- **知识库检索**：记录 query、top_k、命中文档、最高相似度和分块预览。
+
+前端可通过工单详情页或 Agent 监控页查看这些信息。后端也提供独立接口：
+
+```bash
+GET /api/traces/{trace_id}/decisions
+```
+
+返回该 trace 中抽取出的所有决策点，便于前端绘制决策时间线和调试 Agent 路由。
 
 ## 技术栈
 
@@ -144,6 +174,24 @@ ws.onmessage = (event) => {
   const data = JSON.parse(event.data);
   console.log('工单状态更新:', data);
 };
+```
+
+### 查看决策点
+
+```bash
+curl http://localhost:8000/api/traces/{trace_id}/decisions
+```
+
+### 上传知识库文档
+
+```bash
+curl -X POST http://localhost:8000/api/knowledge \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "账务处理指南",
+    "category": "billing",
+    "content": "核对扣费时应先检查订单记录、服务周期和支付流水。"
+  }'
 ```
 
 ## 项目文档
