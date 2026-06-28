@@ -6,6 +6,7 @@
 
 import pytest
 
+from src.multi_agent_system.core.tool_base import ToolBase, ToolRegistry
 from src.multi_agent_system.workflow.graph import (
     build_ticket_graph,
     create_initial_state,
@@ -13,6 +14,53 @@ from src.multi_agent_system.workflow.graph import (
     review_decision,
     route_decision,
 )
+from src.multi_agent_system.agents.processor_react import ReActProcessorAgent
+from pydantic import BaseModel, Field
+
+
+class _MockSearchParams(BaseModel):
+    query: str = Field(description="检索查询")
+
+
+class _MockSearchTool(ToolBase):
+    name = "search_knowledge"
+    description = "检索知识库"
+    params_model = _MockSearchParams
+
+    def __init__(self) -> None:
+        self.queries: list[str] = []
+
+    async def execute(self, query: str) -> str:
+        self.queries.append(query)
+        return f"优惠券知识库命中: {query}"
+
+    async def fallback(self, query: str) -> str:
+        return "知识库不可用"
+
+
+class _StaticClassifierAgent:
+    async def classify(self, content: str) -> dict:
+        return {"category": "inquiry", "priority": "P3", "reason": "咨询优惠券使用"}
+
+
+class _StaticReviewerAgent:
+    async def review(self, content: str, processing_result: str, category: str) -> dict:
+        return {"score": 0.9, "feedback": "引用知识库，回复可用"}
+
+
+class _StaticLLMClient:
+    async def chat_completions_create(self, **kwargs):  # noqa: ANN003, ANN202
+        from unittest.mock import MagicMock
+
+        return MagicMock(
+            choices=[
+                MagicMock(
+                    message=MagicMock(
+                        content="Thought: enough.\nFinal Answer: 按知识库规则使用优惠券。"
+                    )
+                )
+            ]
+        )
 
 
 @pytest.fixture
@@ -25,14 +73,40 @@ class TestTicketWorkflow:
     """工作流状态流转测试。"""
 
     @pytest.mark.asyncio
-    async def test_inquiry_ticket_auto_reply(self, graph):
-        """咨询类工单走 auto_reply 路径。"""
+    async def test_inquiry_ticket_process(self, graph):
+        """咨询类工单走 process 路径（含 LLM + RAG），不再使用固定文案 auto_reply。"""
         result = await graph.ainvoke(create_initial_state("如何修改个人资料？"))
 
         assert result["category"] == "inquiry"
         assert result["status"] == "completed"
         assert result["processing_result"] is not None
-        assert "自动回复" in result["processing_result"]
+
+    @pytest.mark.asyncio
+    async def test_coupon_inquiry_prefetches_knowledge_in_process_path(self):
+        """优惠券咨询类工单进入 process 后应稳定触发知识库检索。"""
+        search_tool = _MockSearchTool()
+        registry = ToolRegistry()
+        registry.register(search_tool)
+        processor = ReActProcessorAgent(
+            model="test-model",
+            tool_registry=registry,
+            client=_StaticLLMClient(),
+        )
+        graph = build_ticket_graph(
+            agents={
+                "classifier": _StaticClassifierAgent(),
+                "processor": processor,
+                "reviewer": _StaticReviewerAgent(),
+            }
+        )
+
+        result = await graph.ainvoke(create_initial_state("咨询一下平台优惠卷如何使用"))
+
+        assert search_tool.queries == ["咨询一下平台优惠券如何使用"]
+        assert result["category"] == "inquiry"
+        assert result["status"] == "completed"
+        assert result["references"] == ["优惠券知识库命中: 咨询一下平台优惠券如何使用"]
+        assert "按知识库规则使用优惠券" in result["processing_result"]
 
     @pytest.mark.asyncio
     async def test_complaint_ticket_escalate(self, graph):
@@ -109,13 +183,13 @@ class TestTicketWorkflow:
 class TestRouteDecision:
     """条件路由决策函数测试。"""
 
-    def test_inquiry_routes_to_auto_reply(self):
-        """咨询类工单路由到 auto_reply。"""
+    def test_inquiry_routes_to_process(self):
+        """咨询类工单路由到 process（走 LLM + RAG，不再用固定文案 auto_reply）。"""
         state = create_initial_state("咨询")
         state["category"] = "inquiry"
         state["priority"] = "P3"
 
-        assert route_decision(state) == "auto_reply"
+        assert route_decision(state) == "process"
 
     def test_complaint_routes_to_escalate(self):
         """投诉类工单路由到 escalate。"""

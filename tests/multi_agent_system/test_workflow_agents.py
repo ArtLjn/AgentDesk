@@ -78,6 +78,19 @@ class TestClassifierAgent:
         assert result["priority"] == "P2"
 
     @pytest.mark.asyncio
+    async def test_classify_general_inquiry_uses_local_rule_without_llm(self):
+        """通用咨询句式命中本地规则时不应等待 LLM。"""
+        agent = ClassifierAgent(model="test-model", api_key="fake")
+
+        result = await agent.classify("咨询一下平台优惠卷如何使用")
+
+        assert result["category"] == "inquiry"
+        assert result["priority"] == "P3"
+        assert result["confidence"] == 0.85
+        assert "咨询" in result["reason"]
+        assert agent._client is None
+
+    @pytest.mark.asyncio
     async def test_classify_fallback_no_keyword_match(self):
         """LLM 失败且无关键词匹配时，默认为咨询类。"""
         mock_client = _make_mock_client(side_effect=Exception("LLM 连接失败"))
@@ -255,6 +268,24 @@ class TestReviewerAgent:
 
         assert result["score"] == 0.7
         assert "默认" in result["feedback"]
+
+    @pytest.mark.asyncio
+    async def test_review_knowledge_grounded_result_uses_local_rule(self):
+        """已引用知识库的处理结果应快速通过本地审核规则。"""
+        mock_client = _make_mock_client(side_effect=AssertionError("不应调用 LLM"))
+
+        agent = ReviewerAgent(model="test-model", api_key="fake")
+        agent._client = mock_client
+
+        result = await agent.review(
+            "咨询一下平台优惠卷如何使用",
+            "您好，已根据知识库整理：\n检索到以下知识片段：优惠券使用规则",
+            "inquiry",
+        )
+
+        assert result["score"] == 0.82
+        assert "知识库" in result["feedback"]
+        mock_client.chat_completions_create.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_review_score_clamped(self):

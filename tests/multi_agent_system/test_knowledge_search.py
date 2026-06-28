@@ -55,6 +55,59 @@ def test_search_uses_query_points_for_new_qdrant_client():
     ]
 
 
+def test_search_falls_back_to_keyword_scan_when_embedding_fails():
+    """embedding 服务异常时，应从 Qdrant payload 兜底检索知识片段。"""
+    tool = KnowledgeSearchTool(
+        qdrant_url="http://qdrant:6333",
+        collection_name="knowledge_base",
+        embedding_base_url="http://embedding",
+        embedding_model="embedding-model",
+        embedding_dim=3,
+    )
+    tool.ensure_collection = MagicMock()
+    tool._get_embedding = MagicMock(side_effect=RuntimeError("embedding 400"))
+
+    client = MagicMock()
+    client.scroll.return_value = (
+        [
+            SimpleNamespace(
+                id="coupon-point",
+                payload={
+                    "document_id": "coupon-doc",
+                    "title": "优惠券使用规则",
+                    "category": "billing-coupon",
+                    "content": "优惠券需在结算页选择，部分商品不可叠加使用。",
+                    "chunk_index": 0,
+                },
+            ),
+            SimpleNamespace(
+                id="login-point",
+                payload={
+                    "document_id": "login-doc",
+                    "title": "登录故障手册",
+                    "category": "technical",
+                    "content": "无法登录时检查账号状态。",
+                    "chunk_index": 0,
+                },
+            ),
+        ],
+        None,
+    )
+    tool._client = client
+
+    results = tool.search("咨询一下平台优惠卷如何使用", top_k=1)
+
+    client.scroll.assert_called_once_with(
+        collection_name="knowledge_base",
+        limit=100,
+        with_payload=True,
+        with_vectors=False,
+    )
+    assert len(results) == 1
+    assert results[0]["metadata"]["title"] == "优惠券使用规则"
+    assert "结算页选择" in results[0]["content"]
+
+
 def test_list_documents_groups_qdrant_chunks_by_document():
     """知识库列表应把 Qdrant 分块聚合回文档视角。"""
     tool = KnowledgeSearchTool(

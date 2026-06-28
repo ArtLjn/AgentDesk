@@ -118,6 +118,36 @@ async def test_react_processor_prefetches_knowledge_for_technical_ticket(mock_cl
 
 
 @pytest.mark.asyncio
+async def test_react_processor_prefetches_knowledge_for_coupon_inquiry(mock_client):
+    """咨询类优惠券问题也应先检索知识库，避免直接生成泛化回答。"""
+    tool = MockSearchTool()
+    registry = ToolRegistry()
+    registry.register(tool)
+    agent = ReActProcessorAgent(
+        model="test-model",
+        tool_registry=registry,
+        client=mock_client,
+    )
+    mock_client.chat_completions_create = AsyncMock(
+        return_value=MagicMock(
+            choices=[
+                MagicMock(
+                    message=MagicMock(
+                        content="Thought: enough.\nFinal Answer: 请按知识库规则使用优惠券。"
+                    )
+                )
+            ]
+        )
+    )
+
+    result = await agent.process("咨询一下平台优惠卷如何使用", "inquiry", "P3")
+
+    assert result["references"] == ["Knowledge about 咨询一下平台优惠券如何使用"]
+    sent_messages = mock_client.chat_completions_create.call_args.kwargs["messages"]
+    assert "Knowledge about 咨询一下平台优惠券如何使用" in sent_messages[0]["content"]
+
+
+@pytest.mark.asyncio
 async def test_react_processor_keeps_prefetched_references_when_json_has_empty_list(mock_client):
     """模型 JSON 返回空 references 时，不能覆盖预检索到的知识库引用。"""
     tool = MockSearchTool()
@@ -144,3 +174,51 @@ async def test_react_processor_keeps_prefetched_references_when_json_has_empty_l
 
     assert result["result"] == "请清理缓存并检查认证服务"
     assert result["references"] == ["Knowledge about ERR-5001 无法登录"]
+
+
+@pytest.mark.asyncio
+async def test_react_processor_fallback_uses_prefetched_knowledge(mock_client):
+    """处理模型不可用时，应基于知识库检索结果生成降级答复。"""
+    tool = MockSearchTool()
+    registry = ToolRegistry()
+    registry.register(tool)
+    agent = ReActProcessorAgent(
+        model="test-model",
+        tool_registry=registry,
+        client=mock_client,
+    )
+    mock_client.chat_completions_create = AsyncMock(side_effect=Exception("LLM 502"))
+
+    result = await agent.process("咨询一下平台优惠卷如何使用", "inquiry", "P3")
+
+    assert "Knowledge about 咨询一下平台优惠券如何使用" in result["result"]
+    assert result["references"] == ["Knowledge about 咨询一下平台优惠券如何使用"]
+
+
+@pytest.mark.asyncio
+async def test_react_processor_accepts_json_final_answer(mock_client):
+    """模型把 ReAct 输出包进 JSON 时，应识别 Final Answer 并结束循环。"""
+    tool = MockSearchTool()
+    registry = ToolRegistry()
+    registry.register(tool)
+    agent = ReActProcessorAgent(
+        model="test-model",
+        tool_registry=registry,
+        client=mock_client,
+    )
+    mock_client.chat_completions_create = AsyncMock(
+        return_value=MagicMock(
+            choices=[
+                MagicMock(
+                    message=MagicMock(
+                        content='{"Thought": "已有知识库上下文", "Final Answer": "请在结算页选择可用券。"}'
+                    )
+                )
+            ]
+        )
+    )
+
+    result = await agent.process("咨询一下平台优惠卷如何使用", "inquiry", "P3")
+
+    assert result["result"] == "请在结算页选择可用券。"
+    assert mock_client.chat_completions_create.call_count == 1
