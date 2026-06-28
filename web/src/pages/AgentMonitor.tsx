@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 import { api } from '@/lib/api'
 import { useTraces } from '@/hooks/useApi'
 import type { Span, Trace, TraceDetail } from '@/types'
@@ -8,10 +8,12 @@ import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Skeleton } from '@/components/ui/skeleton'
+import { DecisionCard, type DecisionData } from '@/components/trace/DecisionCard'
+import { extractFields, FieldList } from '@/components/trace/spanFormat'
 import {
   Activity, RefreshCw, Cpu, Bot, Wrench, Zap, FileJson, Search,
   ArrowRightLeft, Info, X, AlertCircle, Copy, ChevronDown, ChevronUp,
-  ChevronLeft, ChevronRight, BookOpen, CheckCircle2, Tag,
+  ChevronLeft, ChevronRight, BookOpen, CheckCircle2, Tag, GitFork,
 } from 'lucide-react'
 
 type TimelineNode = Span & {
@@ -103,15 +105,16 @@ export function AgentMonitor() {
     })
   }, [pageTraces, filters])
 
-  useEffect(() => {
-    setExpandedIds(new Set())
-    setSelectedSpan(null)
-  }, [page])
-
   const updateFilter = (key: keyof typeof filters, value: string) => {
     setPage(0)
     setExpandedIds(new Set())
     setFilters((prev) => ({ ...prev, [key]: value }))
+  }
+
+  const changePage = (value: number) => {
+    setPage(value)
+    setExpandedIds(new Set())
+    setSelectedSpan(null)
   }
 
   const changePageSize = (value: number) => {
@@ -215,7 +218,7 @@ export function AgentMonitor() {
         total={total}
         totalPages={totalPages}
         isLoading={isLoading}
-        onPageChange={setPage}
+        onPageChange={changePage}
         onPageSizeChange={changePageSize}
       />
 
@@ -516,7 +519,7 @@ function TimelineStats({
 
 function TimelineHeader() {
   return (
-    <div className="grid grid-cols-[28px_180px_1fr_60px_56px_120px] border-b border-border px-3 py-1.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+    <div className="grid grid-cols-[28px_220px_1fr_72px_64px_140px] border-b border-border px-3 py-1.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
       <div className="text-center">类型</div>
       <div>名称</div>
       <div>业务摘要</div>
@@ -534,15 +537,15 @@ function TimelineRoundView({
   round: TimelineRound
   onNodeClick: (span: Span) => void
 }) {
-  const [expanded, setExpanded] = useState(round.index === 0)
+  const [expanded, setExpanded] = useState(true)
   const roundDuration = Math.max(round.duration, 0.001)
 
   return (
-    <div>
+    <div className="border-b border-border/60">
       <button
         type="button"
         onClick={() => setExpanded((value) => !value)}
-        className={`grid w-full grid-cols-[28px_180px_1fr_60px_56px_120px] items-center gap-1 border-b border-border px-3 py-1.5 text-left transition-colors ${
+        className={`grid w-full grid-cols-[28px_220px_1fr_72px_64px_140px] items-center gap-2 border-b border-border/60 px-3 py-2 text-left transition-colors ${
           expanded ? 'bg-primary/5' : 'hover:bg-card'
         }`}
       >
@@ -550,16 +553,16 @@ function TimelineRoundView({
           <span className="rounded bg-primary/15 px-1.5 py-0.5 text-[10px] font-semibold text-primary">
             R{round.index + 1}
           </span>
-          <span className="truncate font-mono text-[10px] text-muted-foreground">{round.title}</span>
+          <span className="truncate font-mono text-[11px] text-muted-foreground">{round.title}</span>
         </span>
-        <span className="truncate text-[10px] text-muted-foreground">
+        <span className="truncate text-[11px] text-muted-foreground">
           {round.nodes.length} 节点 · ✓{round.success}{round.error > 0 && ` · ×${round.error}`}
         </span>
         <span className="text-right font-mono text-[11px] tabular-nums text-foreground/80">
           {formatSeconds(round.duration)}
         </span>
         <span className="text-center text-[10px] text-muted-foreground">—</span>
-        <span className="text-right text-[10px] text-primary">{expanded ? '收起' : '展开'}</span>
+        <span className="text-right text-[11px] text-primary">{expanded ? '收起' : '展开'}</span>
       </button>
       {expanded ? (
         <>
@@ -580,19 +583,23 @@ function TimelineRoundView({
 }
 
 function CompactRoundBar({ nodes, totalDuration }: { nodes: TimelineNode[]; totalDuration: number }) {
-  let offset = 0
+  const segments = nodes.reduce<Array<{ node: TimelineNode; left: number; width: number }>>((acc, node) => {
+    const elapsed = acc.reduce((sum, item) => sum + (item.node.duration || 0), 0)
+    const left = totalDuration > 0 ? (elapsed / totalDuration) * 100 : 0
+    const width = totalDuration > 0 ? Math.max(((node.duration || 0) / totalDuration) * 100, 1) : 1
+    acc.push({ node, left, width })
+    return acc
+  }, [])
+
   return (
-    <div className="grid grid-cols-[28px_180px_1fr_60px_56px_120px] items-center border-b border-border px-3 py-1 text-[11px] text-muted-foreground">
+    <div className="grid grid-cols-[28px_220px_1fr_72px_64px_140px] items-center border-b border-border px-3 py-1 text-[11px] text-muted-foreground">
       <div />
       <div className="text-primary">折叠预览</div>
       <div />
       <div />
       <div />
       <div className="relative h-2 rounded bg-muted">
-        {nodes.map((node) => {
-          const left = totalDuration > 0 ? (offset / totalDuration) * 100 : 0
-          const width = totalDuration > 0 ? Math.max(((node.duration || 0) / totalDuration) * 100, 1) : 1
-          offset += node.duration || 0
+        {segments.map(({ node, left, width }) => {
           return (
             <div
               key={node.span_id}
@@ -617,21 +624,24 @@ function TimelineNodeRow({
 }) {
   const Icon = nodeTypeIcons[node.span_type] || Cpu
   const width = totalDuration > 0 ? Math.max(((node.duration || 0) / totalDuration) * 100, 1) : 1
-  const indent = Math.min(node.depth * 16, 48)
+  const indent = Math.min(node.depth * 22, 80)
   const summary = summarizeSpan(node)
 
   return (
     <button
       type="button"
       onClick={onClick}
-      className="grid w-full grid-cols-[28px_180px_1fr_60px_56px_120px] items-center gap-1 border-b border-border/60 px-3 py-1 text-left transition-colors hover:bg-card"
+      className="grid w-full grid-cols-[28px_220px_1fr_72px_64px_140px] items-center gap-2 border-b border-border/40 px-3 py-1.5 text-left transition-colors hover:bg-card"
     >
       <div className="text-center">
-        <span className={`inline-block h-2 w-2 rounded-full ${nodeTypeColors[node.span_type] || 'bg-muted-foreground'}`} />
+        <span className={`inline-block h-2.5 w-2.5 rounded-full ${nodeTypeColors[node.span_type] || 'bg-muted-foreground'}`} />
       </div>
       <div className="flex min-w-0 items-center gap-1.5" style={{ paddingLeft: indent }}>
-        <Icon className="h-3 w-3 shrink-0 text-muted-foreground" />
-        <span className="truncate text-[11px] font-medium">{node.name}</span>
+        <Icon className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+        <span className="truncate text-[12px] font-medium">{node.name}</span>
+        {node.depth > 0 && (
+          <span className="shrink-0 text-[10px] text-muted-foreground/60">↳ L{node.depth}</span>
+        )}
       </div>
       <div className="truncate text-[11px] text-muted-foreground">{summary}</div>
       <div className="text-right font-mono text-[11px] tabular-nums text-foreground/80">
@@ -642,7 +652,7 @@ function TimelineNodeRow({
           {node.status}
         </Badge>
       </div>
-      <div className="relative h-1.5 rounded-full bg-muted overflow-hidden">
+      <div className="relative h-2 rounded-full bg-muted overflow-hidden">
         <div
           className={`absolute top-0 left-0 h-full rounded-full ${nodeTypeColors[node.span_type] || 'bg-muted-foreground'}`}
           style={{ width: `${width}%` }}
@@ -677,9 +687,18 @@ function TimelineLegend() {
 
 function NodeDrawer({ span, onClose }: { span: Span; onClose: () => void }) {
   const Icon = nodeTypeIcons[span.span_type] || Cpu
+  const metadata = (span.metadata || {}) as Record<string, unknown>
+  const decision = (metadata.decision || null) as DecisionData | null
+
   return (
-    <div className="fixed inset-0 z-50 flex justify-end bg-black/20">
-      <aside className="h-full w-[640px] border-l border-border bg-popover shadow-xl">
+    <div
+      className="fixed inset-0 z-[100] flex justify-end bg-black/30"
+      onClick={onClose}
+    >
+      <aside
+        className="h-full w-[760px] max-w-[95vw] border-l border-border bg-popover shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
         <div className="flex items-center justify-between border-b border-border px-5 py-4">
           <div>
             <h3 className="flex items-center gap-2 text-base font-semibold">
@@ -715,6 +734,16 @@ function NodeDrawer({ span, onClose }: { span: Span; onClose: () => void }) {
               </div>
             )}
 
+            {decision && (
+              <div>
+                <div className="mb-2 flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+                  <GitFork className="h-3.5 w-3.5 text-primary" />
+                  <span>决策点</span>
+                </div>
+                <DecisionCard decision={decision} />
+              </div>
+            )}
+
             {span.input_data && (
               <Payload title="输入数据" icon={<ArrowRightLeft className="h-3.5 w-3.5 text-sky-400" />} data={span.input_data} />
             )}
@@ -745,6 +774,9 @@ function Payload({ title, icon, data }: { title: string; icon: React.ReactNode; 
   const copy = async () => {
     await navigator.clipboard.writeText(content)
   }
+  const fields = typeof data === 'object' && data !== null && !Array.isArray(data)
+    ? extractFields(data as Record<string, unknown>)
+    : []
 
   return (
     <div>
@@ -758,9 +790,13 @@ function Payload({ title, icon, data }: { title: string; icon: React.ReactNode; 
           复制
         </Button>
       </div>
-      <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-md border border-border bg-background p-3 text-[12px] leading-relaxed text-foreground/85">
-        {content}
-      </pre>
+      {fields.length > 0 ? (
+        <FieldList fields={fields} />
+      ) : (
+        <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-md border border-border bg-background p-3 text-[12px] leading-relaxed text-foreground/85">
+          {content}
+        </pre>
+      )}
     </div>
   )
 }

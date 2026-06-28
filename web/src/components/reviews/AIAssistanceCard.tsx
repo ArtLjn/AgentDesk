@@ -1,5 +1,6 @@
 import { Sparkles, AlertCircle } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Markdown } from '@/components/ui/markdown'
 import type { AISuggestion } from '@/types'
 import { decisionMeta } from './reviewUtils'
 import { cn } from '@/lib/utils'
@@ -64,9 +65,9 @@ export function AIAssistanceCard({ suggestion }: Props) {
 
         <div>
           <p className="text-[10px] uppercase tracking-wide text-muted-foreground mb-1">推理</p>
-          <p className="rounded-md border border-border bg-background p-2.5 text-xs leading-relaxed whitespace-pre-wrap">
-            {suggestion.reasoning}
-          </p>
+          <div className="rounded-md border border-border bg-background p-2.5">
+            <Markdown>{suggestion.reasoning}</Markdown>
+          </div>
         </div>
 
         {suggestion.key_concerns?.length > 0 && (

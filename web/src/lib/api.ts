@@ -1,4 +1,17 @@
-import type { KnowledgeListResponse, TraceListResponse } from '@/types'
+import type {
+  Analytics,
+  ApiRecord,
+  KnowledgeListResponse,
+  SystemSettings,
+  Ticket,
+  TicketCreateResponse,
+  TicketFeedbackResponse,
+  TicketListParams,
+  TraceDecisionsResponse,
+  TraceDetail,
+  TraceListResponse,
+  TraceStatsResponse,
+} from '@/types'
 
 const BASE_URL = '/api'
 
@@ -59,26 +72,27 @@ export const api = {
   getAuthState: () => request<AuthState>('/auth/me'),
 
   // 工单
-  getTickets: (params?: Record<string, string>) => {
-    const qs = params ? '?' + new URLSearchParams(params).toString() : ''
-    return request<any[]>(`/tickets${qs}`)
+  getTickets: (params?: TicketListParams) => {
+    const qs = params ? '?' + new URLSearchParams(Object.entries(params)).toString() : ''
+    return request<Ticket[]>(`/tickets${qs}`)
   },
-  getTicket: (id: string) => request<any>(`/tickets/${id}`),
+  getTicket: (id: string) => request<Ticket>(`/tickets/${id}`),
   createTicket: (data: { content: string; user_id?: string }) =>
-    request<any>('/tickets', { method: 'POST', body: JSON.stringify(data) }),
+    request<TicketCreateResponse>('/tickets', { method: 'POST', body: JSON.stringify(data) }),
   submitFeedback: (id: string, satisfied: boolean) =>
-    request<any>(`/tickets/${id}/feedback`, { method: 'POST', body: JSON.stringify({ satisfied }) }),
+    request<TicketFeedbackResponse>(`/tickets/${id}/feedback`, { method: 'POST', body: JSON.stringify({ satisfied }) }),
 
   // Trace
   getTraces: (params?: Record<string, string>) => {
     const qs = params ? '?' + new URLSearchParams(params).toString() : ''
     return request<TraceListResponse>(`/traces${qs}`)
   },
-  getTicketTrace: (ticketId: string) => request<any>(`/tickets/${ticketId}/trace`),
-  getTraceStats: (traceId: string) => request<any>(`/traces/${traceId}/stats`),
+  getTicketTrace: (ticketId: string) => request<TraceDetail>(`/tickets/${ticketId}/trace`),
+  getTraceStats: (traceId: string) => request<TraceStatsResponse>(`/traces/${traceId}/stats`),
+  getTraceDecisions: (traceId: string) => request<TraceDecisionsResponse>(`/traces/${traceId}/decisions`),
 
   // Analytics
-  getAnalytics: () => request<any>('/analytics'),
+  getAnalytics: () => request<Analytics>('/analytics'),
 
   // Knowledge
   getKnowledge: (params?: Record<string, string>) => {
@@ -86,11 +100,11 @@ export const api = {
     return request<KnowledgeListResponse>(`/knowledge${qs}`)
   },
   uploadKnowledge: (data: { title: string; content: string; category?: string }) =>
-    request<any>('/knowledge', { method: 'POST', body: JSON.stringify(data) }),
+    request<ApiRecord>('/knowledge', { method: 'POST', body: JSON.stringify(data) }),
 
   // Settings
-  getSettings: () => request<any>('/settings'),
+  getSettings: () => request<SystemSettings>('/settings'),
 
   // Health（不鉴权，供前端探活）
-  getHealth: () => request<any>('/health'),
+  getHealth: () => request<ApiRecord>('/health'),
 }

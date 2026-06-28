@@ -35,11 +35,13 @@ export function useTraces(params?: Record<string, string>) {
   })
 }
 
-export function useTicketTrace(ticketId: string) {
+export function useTicketTrace(ticketId: string, isRunning?: boolean) {
   return useQuery({
     queryKey: ['ticketTrace', ticketId],
     queryFn: () => api.getTicketTrace(ticketId),
     enabled: !!ticketId,
+    refetchInterval: isRunning ? 1500 : false,
+    refetchOnWindowFocus: true,
   })
 }
 
@@ -47,6 +49,14 @@ export function useTraceStats(traceId: string) {
   return useQuery({
     queryKey: ['traceStats', traceId],
     queryFn: () => api.getTraceStats(traceId),
+    enabled: !!traceId,
+  })
+}
+
+export function useTraceDecisions(traceId: string) {
+  return useQuery({
+    queryKey: ['traceDecisions', traceId],
+    queryFn: () => api.getTraceDecisions(traceId),
     enabled: !!traceId,
   })
 }

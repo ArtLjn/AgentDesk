@@ -14,7 +14,7 @@ export interface Ticket {
   created_at: string
 }
 
-export type TicketStatus = 'received' | 'classifying' | 'processing' | 'reviewing' | 'completed' | 'failed'
+export type TicketStatus = 'received' | 'classifying' | 'processing' | 'reviewing' | 'pending_human_review' | 'completed' | 'failed'
 export type TicketCategory = 'technical' | 'billing' | 'complaint' | 'inquiry'
 export type TicketPriority = 'P0' | 'P1' | 'P2' | 'P3'
 
@@ -48,9 +48,9 @@ export interface Span {
   span_id: string
   trace_id: string
   parent_span_id: string | null
-  span_type: 'node' | 'react_iter' | 'llm_call' | 'tool_call'
+  span_type: 'node' | 'react_iter' | 'llm_call' | 'tool_call' | 'memory_call' | 'human_decision' | string
   name: string
-  status: 'ok' | 'error' | 'fallback'
+  status: 'ok' | 'error' | 'fallback' | string
   input_data: Record<string, unknown> | null
   output_data: Record<string, unknown> | null
   start_time: number
@@ -80,6 +80,35 @@ export interface TraceDetail {
   spans: Span[]
 }
 
+export type DecisionType = 'routing' | 'branching' | 'quality_gate' | 'boundary' | 'tool_selection' | 'escalation'
+
+export interface DecisionOption {
+  value: string
+  score: number
+  reason: string
+}
+
+export interface TraceDecision {
+  span_id: string
+  span_name: string
+  span_type: string
+  decision_type: DecisionType | string
+  trigger: Record<string, unknown> | null
+  options_count: number
+  options: DecisionOption[]
+  selection_value: string
+  confidence: number | null
+  reason: string | null
+  start_time: number
+  duration: number | null
+}
+
+export interface TraceDecisionsResponse {
+  trace_id: string
+  decision_count: number
+  decisions: TraceDecision[]
+}
+
 export interface TraceListResponse {
   traces: Trace[]
   count: number
@@ -97,16 +126,18 @@ export interface ResolutionStats {
   success_rate: number
 }
 
+export interface EfficiencyStats {
+  avg_tokens_per_ticket: number
+  avg_duration_seconds: number
+  avg_tool_calls: number
+}
+
 export interface Analytics {
   category_distribution: Record<string, number>
   priority_distribution: Record<string, number>
   resolution_stats: ResolutionStats
   daily_stats: DailyStat[]
-  efficiency: {
-    avg_tokens_per_ticket: number
-    avg_duration_seconds: number
-    avg_tool_calls: number
-  }
+  efficiency: EfficiencyStats
   evaluation: {
     total: number
     completed: number
@@ -127,6 +158,7 @@ export interface DailyStat {
   total: number
   completed: number
   failed: number
+  created?: number
 }
 
 // 知识库
@@ -158,6 +190,34 @@ export interface KnowledgeListResponse {
   count: number
   next_offset: string | null
 }
+
+export interface TicketListParams {
+  status?: string
+  category?: string
+  limit?: string
+  offset?: string
+}
+
+export type TicketCreateResponse = Ticket
+
+export interface TicketFeedbackResponse {
+  status: string
+  ticket_id: string
+  satisfied: boolean
+}
+
+export interface TraceStatsResponse {
+  trace_id: string
+  total_duration: number
+  node_count: number
+  llm_calls: number
+  tool_calls: number
+  total_tokens: number
+  slowest_node: string | null
+  error_nodes: string[]
+}
+
+export type ApiRecord = Record<string, unknown>
 
 // WebSocket
 export interface WSMessage {
@@ -292,11 +352,24 @@ export interface ReviewDecidedEvent {
 // 系统设置
 export interface SystemSettings {
   llm_base_url: string
+  llm_api_key_configured: boolean
   llm_api_key: string
   llm_model: string
+  embedding_base_url: string
+  embedding_model: string
+  embedding_dim: number
+  model_routes: Record<string, string>
+  fallback_model: string
   max_retries: number
   review_threshold: number
   max_react_iterations: number
   max_messages: number
   max_concurrency: number
+  qdrant_url: string
+  qdrant_collection: string
+  knowledge_available: boolean
+  cache_enabled: boolean
+  cache_max_size: number
+  cache_ttl: number
+  checkpoint_ttl: number
 }
