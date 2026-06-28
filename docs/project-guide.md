@@ -37,10 +37,13 @@ src/multi_agent_system/
 │   ├── logging.py      # trace_id 链路追踪
 │   └── json_parser.py  # LLM JSON 响应解析
 ├── models/
-│   ├── ticket.py       # 工单数据模型
-│   └── knowledge.py    # 知识库模型
+│   ├── ticket.py       # 工单数据模型（Pydantic DTO）
+│   ├── review.py       # 人工审核数据模型（Pydantic DTO）
+│   ├── knowledge.py    # 知识库模型
+│   ├── base.py         # SQLAlchemy ORM declarative base
+│   └── db.py           # SQLAlchemy ORM 表定义（7 张表）
 ├── tools/
-│   ├── db_query.py     # 内存数据库
+│   ├── db_query.py     # 数据库查询工具（封装 DatabaseManager）
 │   ├── knowledge_search.py # Qdrant 向量检索
 │   ├── notification.py # 通知工具
 │   └── analytics.py    # 统计分析
@@ -150,6 +153,7 @@ POST /api/tickets
 | 工作流编排 | LangGraph |
 | API 框架 | FastAPI + Uvicorn |
 | 数据校验 | Pydantic |
+| 关系数据库 | SQLAlchemy 2.0 async（生产 MySQL/腾讯云、测试 SQLite 内存） |
 | 向量数据库 | Qdrant |
 | 缓存 | cachetools (LRU + TTL) |
 | 指标 | prometheus-client |

@@ -89,12 +89,9 @@ http_timeout: 30              # 秒
 # ---------------------------------------------------------------------------
 # 数据库 / 存储
 # ---------------------------------------------------------------------------
-# database_url：SQLAlchemy 异步 URL
-#   生产（腾讯云 MySQL）：mysql+aiomysql://user:password@host:port/dbname?charset=utf8mb4
-#   本地/测试（SQLite）：sqlite+aiosqlite:///data/app.db
-# db_path：仅兼容字段，database_url 留空时据此合成 SQLite URL
-db_path: "data/app.db"
-database_url: ""  # 留空时自动走 sqlite+aiosqlite:///{db_path}
+# SQLAlchemy 异步 URL（MySQL），格式：
+#   mysql+aiomysql://user:password@host:port/dbname?charset=utf8mb4
+database_url: "mysql+aiomysql://REPLACE_USER:REPLACE_PASSWORD@REPLACE_HOST:3306/REPLACE_DB?charset=utf8mb4"
 
 # ---------------------------------------------------------------------------
 # 可观测性

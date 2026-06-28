@@ -1,0 +1,177 @@
+"""SQLAlchemy ORM 表定义。
+
+所有数据库表的 ORM 模型集中在本文件，避免与 Pydantic DTO（ticket.py、review.py、
+knowledge.py）的命名冲突。Pydantic 模型用于 API 层数据校验，ORM 模型用于数据库读写，
+两者通过 DatabaseManager 内部转换。
+
+索引命名保持与原 SQLite schema 一致，便于运维脚本与测试兼容。
+"""
+
+from sqlalchemy import DateTime, Double, Index, Integer, String, Text
+from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.sql import func
+
+from src.multi_agent_system.models.base import Base
+
+__all__ = [
+    "Base",
+    "TicketORM",
+    "UserORM",
+    "CheckpointORM",
+    "PatternORM",
+    "TraceORM",
+    "SpanORM",
+    "HumanReviewORM",
+]
+
+
+class TicketORM(Base):
+    """工单主表。"""
+
+    __tablename__ = "tickets"
+
+    ticket_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str | None] = mapped_column(String(64))
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    category: Mapped[str | None] = mapped_column(String(64))
+    priority: Mapped[str | None] = mapped_column(String(16))
+    processing_result: Mapped[str | None] = mapped_column(Text)
+    references_json: Mapped[str | None] = mapped_column(Text)
+    review_score: Mapped[float | None] = mapped_column(Double)
+    retry_count: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[str] = mapped_column(String(32), default="received")
+    error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[str | None] = mapped_column(DateTime, server_default=func.now())
+    resolved_at: Mapped[str | None] = mapped_column(DateTime)
+    satisfied: Mapped[int | None] = mapped_column(Integer)
+    token_count: Mapped[int] = mapped_column(Integer, default=0)
+    tool_call_count: Mapped[int] = mapped_column(Integer, default=0)
+    total_duration: Mapped[float] = mapped_column(Double, default=0.0)
+
+    __table_args__ = (
+        Index("idx_tickets_user", "user_id"),
+        Index("idx_tickets_status", "status"),
+        Index("idx_tickets_category", "category"),
+        # 替代原 SQLite partial index idx_tickets_pending（MySQL 8 不支持 partial index）
+        Index("idx_tickets_status_created", "status", "created_at"),
+    )
+
+
+class UserORM(Base):
+    """用户信息表。"""
+
+    __tablename__ = "users"
+
+    user_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    name: Mapped[str | None] = mapped_column(String(128))
+    vip_level: Mapped[int] = mapped_column(Integer, default=0)
+    preferred_category: Mapped[str | None] = mapped_column(String(64))
+    avg_satisfaction: Mapped[float | None] = mapped_column(Double)
+    total_tickets: Mapped[int] = mapped_column(Integer, default=0)
+    last_contact: Mapped[str | None] = mapped_column(DateTime)
+
+
+class CheckpointORM(Base):
+    """流程中断恢复检查点。"""
+
+    __tablename__ = "checkpoints"
+
+    checkpoint_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    ticket_id: Mapped[str] = mapped_column(String(64), unique=True)
+    state_json: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[str | None] = mapped_column(DateTime, server_default=func.now())
+    expires_at: Mapped[str] = mapped_column(DateTime, nullable=False)
+
+    __table_args__ = (
+        Index("idx_checkpoints_expires", "expires_at"),
+    )
+
+
+class PatternORM(Base):
+    """模式匹配知识库。"""
+
+    __tablename__ = "patterns"
+
+    pattern_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    category: Mapped[str] = mapped_column(String(64), nullable=False)
+    keywords: Mapped[str | None] = mapped_column(Text)
+    solution_template: Mapped[str] = mapped_column(Text, nullable=False)
+    success_rate: Mapped[float] = mapped_column(Double, default=0.0)
+    usage_count: Mapped[int] = mapped_column(Integer, default=0)
+
+    __table_args__ = (
+        Index("idx_patterns_category_usage", "category", "usage_count"),
+    )
+
+
+class TraceORM(Base):
+    """trace 根表（可观测）。"""
+
+    __tablename__ = "traces"
+
+    trace_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    ticket_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="running")
+    start_time: Mapped[float] = mapped_column(Double, nullable=False)
+    end_time: Mapped[float | None] = mapped_column(Double)
+    duration: Mapped[float | None] = mapped_column(Double)
+    total_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    total_tool_calls: Mapped[int] = mapped_column(Integer, default=0)
+    node_count: Mapped[int] = mapped_column(Integer, default=0)
+    error: Mapped[str | None] = mapped_column(Text)
+
+    __table_args__ = (
+        Index("idx_traces_ticket", "ticket_id"),
+        Index("idx_traces_status", "status"),
+    )
+
+
+class SpanORM(Base):
+    """span 子表（可观测）。"""
+
+    __tablename__ = "spans"
+
+    span_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    trace_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    parent_span_id: Mapped[str | None] = mapped_column(String(64))
+    span_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), default="ok")
+    input_data: Mapped[str | None] = mapped_column(Text)
+    output_data: Mapped[str | None] = mapped_column(Text)
+    start_time: Mapped[float] = mapped_column(Double, nullable=False)
+    end_time: Mapped[float | None] = mapped_column(Double)
+    duration: Mapped[float | None] = mapped_column(Double)
+    metadata_: Mapped[str | None] = mapped_column("metadata", Text)
+
+    __table_args__ = (
+        Index("idx_spans_trace", "trace_id"),
+        Index("idx_spans_parent", "parent_span_id"),
+        Index("idx_spans_type", "span_type"),
+    )
+
+
+class HumanReviewORM(Base):
+    """人工审核工单。"""
+
+    __tablename__ = "human_reviews"
+
+    review_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    ticket_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    trigger_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    trigger_reason: Mapped[str | None] = mapped_column(Text)
+    ai_suggestion: Mapped[str | None] = mapped_column(Text)
+    decision: Mapped[str | None] = mapped_column(Text)
+    decision_reason: Mapped[str | None] = mapped_column(Text)
+    rewritten_result: Mapped[str | None] = mapped_column(Text)
+    reviewer_id: Mapped[str | None] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    created_at: Mapped[str | None] = mapped_column(DateTime)
+    decided_at: Mapped[str | None] = mapped_column(DateTime)
+
+    __table_args__ = (
+        Index("idx_hr_status", "status"),
+        Index("idx_hr_ticket", "ticket_id"),
+        Index("idx_hr_trigger", "trigger_type"),
+        Index("idx_hr_reviewer", "reviewer_id"),
+    )

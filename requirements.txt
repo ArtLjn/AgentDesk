@@ -5,7 +5,8 @@ langgraph>=0.1.0
 llama-index>=0.10.0
 
 # Database
-aiosqlite>=0.20.0
+sqlalchemy[asyncio]>=2.0.30
+aiomysql>=0.2.0
 
 # Vector Database
 qdrant-client>=1.7.0

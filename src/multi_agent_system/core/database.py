@@ -1,221 +1,290 @@
-"""Async SQLite database manager with schema migrations."""
+"""Async database manager (SQLAlchemy 2.0) — 兼容 SQLite 测试与 MySQL 生产。
+
+设计要点：
+- 所有公共方法签名与返回 dict 形状保持稳定，外部调用方无需改动
+- 引擎层用 SQLAlchemy AsyncEngine + async_sessionmaker 抹平方言差异
+- connection() 上下文管理器返回 _RawConnShim，兼容 trace.py/evaluation.py 中的
+  原始 SQL + `?` 占位符写法（内部转命名占位符 + text()）
+"""
 
 import json
+import re
 from contextlib import asynccontextmanager
-from pathlib import Path
+from datetime import datetime
 from typing import Any, AsyncGenerator
 
-import aiosqlite
 from loguru import logger
+from sqlalchemy import case, func, select, text
+from sqlalchemy.engine import Row
+from sqlalchemy.ext.asyncio import (
+    AsyncConnection,
+    AsyncEngine,
+    async_sessionmaker,
+    create_async_engine,
+)
+
+from src.multi_agent_system.models.db import (
+    Base,
+    CheckpointORM,
+    HumanReviewORM,
+    PatternORM,
+    SpanORM,
+    TicketORM,
+    TraceORM,
+    UserORM,
+)
 
 __all__ = ["DatabaseManager", "get_db_manager", "reset_db_manager"]
 
-# Schema definition
-_SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS tickets (
-    ticket_id TEXT PRIMARY KEY,
-    user_id TEXT,
-    content TEXT NOT NULL,
-    category TEXT,
-    priority TEXT,
-    processing_result TEXT,
-    references_json TEXT,
-    review_score REAL,
-    retry_count INTEGER DEFAULT 0,
-    status TEXT DEFAULT 'received',
-    error TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    resolved_at TIMESTAMP,
-    satisfied INTEGER,
-    token_count INTEGER DEFAULT 0,
-    tool_call_count INTEGER DEFAULT 0,
-    total_duration REAL DEFAULT 0.0
-);
 
-CREATE TABLE IF NOT EXISTS users (
-    user_id TEXT PRIMARY KEY,
-    name TEXT,
-    vip_level INTEGER DEFAULT 0,
-    preferred_category TEXT,
-    avg_satisfaction REAL,
-    total_tickets INTEGER DEFAULT 0,
-    last_contact TIMESTAMP
-);
+# ============================================================
+# 原始 SQL 适配层：让旧代码 `await conn.execute(sql_with_?, params)` 继续工作
+# ============================================================
 
-CREATE TABLE IF NOT EXISTS checkpoints (
-    checkpoint_id TEXT PRIMARY KEY,
-    ticket_id TEXT NOT NULL UNIQUE,
-    state_json TEXT NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    expires_at TIMESTAMP NOT NULL
-);
+_PLACEHOLDER_RE = re.compile(r"\?")
 
-CREATE TABLE IF NOT EXISTS patterns (
-    pattern_id TEXT PRIMARY KEY,
-    category TEXT NOT NULL,
-    keywords TEXT,
-    solution_template TEXT NOT NULL,
-    success_rate REAL DEFAULT 0.0,
-    usage_count INTEGER DEFAULT 0
-);
 
-CREATE INDEX IF NOT EXISTS idx_tickets_user ON tickets(user_id);
-CREATE INDEX IF NOT EXISTS idx_tickets_status ON tickets(status);
-CREATE INDEX IF NOT EXISTS idx_tickets_category ON tickets(category);
-CREATE INDEX IF NOT EXISTS idx_checkpoints_expires ON checkpoints(expires_at);
+def _convert_placeholders(sql: str, params: Any) -> tuple[str, dict[str, Any]]:
+    """把 SQLite `?` 占位符 + list 入参转成 SQLAlchemy 命名占位符 + dict。"""
+    if params is None:
+        return sql, {}
+    if isinstance(params, dict):
+        return sql, params
 
-CREATE TABLE IF NOT EXISTS traces (
-    trace_id TEXT PRIMARY KEY,
-    ticket_id TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'running',
-    start_time REAL NOT NULL,
-    end_time REAL,
-    duration REAL,
-    total_tokens INTEGER DEFAULT 0,
-    total_tool_calls INTEGER DEFAULT 0,
-    node_count INTEGER DEFAULT 0,
-    error TEXT
-);
+    params_list = list(params)
+    if "?" not in sql:
+        return sql, {f"p{i}": v for i, v in enumerate(params_list)}
 
-CREATE TABLE IF NOT EXISTS spans (
-    span_id TEXT PRIMARY KEY,
-    trace_id TEXT NOT NULL,
-    parent_span_id TEXT,
-    span_type TEXT NOT NULL,
-    name TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'ok',
-    input_data TEXT,
-    output_data TEXT,
-    start_time REAL NOT NULL,
-    end_time REAL,
-    duration REAL,
-    metadata TEXT
-);
+    def _replace(_m: re.Match, _counter: list[int] = [0]) -> str:
+        idx = _counter[0]
+        _counter[0] += 1
+        return f":p{idx}"
 
-CREATE INDEX IF NOT EXISTS idx_spans_trace ON spans(trace_id);
-CREATE INDEX IF NOT EXISTS idx_spans_parent ON spans(parent_span_id);
-CREATE INDEX IF NOT EXISTS idx_spans_type ON spans(span_type);
-CREATE INDEX IF NOT EXISTS idx_traces_ticket ON traces(ticket_id);
-CREATE INDEX IF NOT EXISTS idx_traces_status ON traces(status);
+    new_sql = _PLACEHOLDER_RE.sub(_replace, sql)
+    return new_sql, {f"p{i}": v for i, v in enumerate(params_list)}
 
-CREATE TABLE IF NOT EXISTS human_reviews (
-    review_id        TEXT PRIMARY KEY,
-    ticket_id        TEXT NOT NULL,
-    trigger_type     TEXT NOT NULL,
-    trigger_reason   TEXT,
-    ai_suggestion    TEXT,
-    decision         TEXT,
-    decision_reason  TEXT,
-    rewritten_result TEXT,
-    reviewer_id      TEXT,
-    status           TEXT NOT NULL,
-    created_at       TIMESTAMP,
-    decided_at       TIMESTAMP
-);
 
-CREATE INDEX IF NOT EXISTS idx_hr_status   ON human_reviews(status);
-CREATE INDEX IF NOT EXISTS idx_hr_ticket   ON human_reviews(ticket_id);
-CREATE INDEX IF NOT EXISTS idx_hr_trigger  ON human_reviews(trigger_type);
-CREATE INDEX IF NOT EXISTS idx_hr_reviewer ON human_reviews(reviewer_id);
+class _DictRow(dict):
+    """支持 row["col"]、row[0] 整数索引、dict(row) 三种访问方式。"""
 
--- 部分索引：加速待审核工单查询。SQLite 3.8.0+ 支持。
-CREATE INDEX IF NOT EXISTS idx_tickets_pending
-    ON tickets(created_at) WHERE status = 'pending_human_review';
-"""
+    def __init__(self, mapping) -> None:
+        super().__init__(mapping)
+        # 保留列顺序，便于 row[0] 整数索引
+        self._keys = list(mapping.keys())
+
+    def __getitem__(self, key):
+        if isinstance(key, int):
+            return super().__getitem__(self._keys[key])
+        return super().__getitem__(key)
+
+    @classmethod
+    def from_row(cls, row: Row | None) -> "_DictRow | None":
+        if row is None:
+            return None
+        return cls(row._mapping)
+
+
+class _RawResultShim:
+    """包装 SQLAlchemy CursorResult，提供 aiosqlite 风格的 fetch 接口。"""
+
+    def __init__(self, result: Any) -> None:
+        self._result = result
+        self.rowcount: int = getattr(result, "rowcount", -1)
+
+    async def fetchone(self) -> _DictRow | None:
+        return _DictRow.from_row(self._result.fetchone())
+
+    async def fetchall(self) -> list[_DictRow]:
+        return [_DictRow(r._mapping) for r in self._result.fetchall()]
+
+
+class _RawConnShim:
+    """包装 AsyncConnection，提供 `?` 占位符 SQL + cursor 风格 API。
+
+    用于兼容 trace.py / evaluation.py 中已有的原始 SQL 写法。
+    """
+
+    def __init__(self, conn: AsyncConnection) -> None:
+        self._conn = conn
+
+    async def execute(self, sql: str, params: Any = None) -> _RawResultShim:
+        new_sql, params_dict = _convert_placeholders(sql, params)
+        result = await self._conn.execute(text(new_sql), params_dict)
+        return _RawResultShim(result)
+
+    async def executemany(self, sql: str, params_seq: list[Any]) -> _RawResultShim:
+        converted = [_convert_placeholders(sql, p)[1] for p in params_seq]
+        result = await self._conn.execute(text(sql), converted)
+        return _RawResultShim(result)
+
+    async def commit(self) -> None:
+        await self._conn.commit()
+
+
+# ============================================================
+# DatabaseManager
+# ============================================================
 
 
 class DatabaseManager:
-    """Async SQLite connection manager with connection pooling."""
+    """基于 SQLAlchemy 2.0 async 的数据库管理器（仅 MySQL）。"""
 
-    def __init__(self, db_path: str = "data/app.db") -> None:
-        self._db_path = db_path
-        self._connection: aiosqlite.Connection | None = None
+    def __init__(self, database_url: str) -> None:
+        self._url = database_url
+        self._engine: AsyncEngine | None = None
+        self._session_factory: async_sessionmaker | None = None
 
     async def initialize(self) -> None:
-        """Create database file, run schema migrations."""
-        Path(self._db_path).parent.mkdir(parents=True, exist_ok=True)
-        self._connection = await aiosqlite.connect(self._db_path)
-        self._connection.row_factory = aiosqlite.Row
-        await self._connection.executescript(_SCHEMA_SQL)
-        await self._ensure_column("tickets", "references_json", "TEXT")
-        await self._connection.commit()
-        logger.info(f"[Database] Initialized: {self._db_path}")
+        """创建引擎并建表（幂等）。"""
+        self._engine = create_async_engine(
+            self._url,
+            pool_recycle=3600,
+        )
+        self._session_factory = async_sessionmaker(
+            self._engine, expire_on_commit=False, autoflush=False
+        )
+        async with self._engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        logger.info(f"[Database] Initialized: {self._url.split('@')[-1]}")
 
-    async def _ensure_column(self, table: str, column: str, definition: str) -> None:
-        """为旧数据库补充新增字段。"""
-        if self._connection is None:
+    async def truncate_all(self) -> None:
+        """清空所有业务表数据（保留表结构）。供测试 fixture 隔离使用。"""
+        if self._engine is None:
             raise RuntimeError("Database not initialized. Call initialize() first.")
-        cursor = await self._connection.execute(f"PRAGMA table_info({table})")
-        rows = await cursor.fetchall()
-        if column in {row["name"] for row in rows}:
-            return
-        await self._connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+        table_names = list(reversed(sorted(Base.metadata.tables.keys())))
+        async with self._engine.begin() as conn:
+            # MySQL 的 TRUNCATE 一次只能清一张表
+            await conn.execute(text("SET FOREIGN_KEY_CHECKS = 0"))
+            for t in table_names:
+                await conn.execute(text(f"TRUNCATE TABLE `{t}`"))
+            await conn.execute(text("SET FOREIGN_KEY_CHECKS = 1"))
+        logger.debug(f"[Database] Truncated {len(table_names)} tables")
 
     @asynccontextmanager
-    async def connection(self) -> AsyncGenerator[aiosqlite.Connection, None]:
-        """Yield the singleton connection."""
-        if self._connection is None:
+    async def connection(self) -> AsyncGenerator[_RawConnShim, None]:
+        """对外暴露原始 SQL 接口（兼容旧调用方）。"""
+        if self._engine is None:
             raise RuntimeError("Database not initialized. Call initialize() first.")
-        yield self._connection
+        async with self._engine.connect() as conn:
+            yield _RawConnShim(conn)
 
     async def close(self) -> None:
-        """Close the database connection."""
-        if self._connection:
-            await self._connection.close()
-            self._connection = None
-            logger.info("[Database] Connection closed")
+        if self._engine:
+            await self._engine.dispose()
+            self._engine = None
+            self._session_factory = None
+            logger.info("[Database] Engine disposed")
 
-    # Ticket operations
+    # ============================================================
+    # 内部工具
+    # ============================================================
+
+    def _session(self):
+        if self._session_factory is None:
+            raise RuntimeError("Database not initialized. Call initialize() first.")
+        return self._session_factory()
+
+    @staticmethod
+    def _orm_to_dict(obj: Any) -> dict[str, Any]:
+        if obj is None:
+            return {}
+        out: dict[str, Any] = {}
+        # 用 mapper.columns 拿到 Python 属性名（key）→ DB 列名（column.name）映射。
+        # 直接用 __table__.columns 时 c.key 与 c.name 同值，遇到列名 "metadata"
+        # 这种 SQLAlchemy 保留属性会被 Base.metadata 遮蔽。
+        for attr_name, column in obj.__mapper__.columns.items():
+            v = getattr(obj, attr_name)
+            # datetime 序列化为 "YYYY-MM-DD HH:MM:SS" 字符串，保持与原 aiosqlite
+            # 返回的 TIMESTAMP 行为一致，避免调用方 created_at[:10] 等切片操作失效
+            if isinstance(v, datetime):
+                v = v.strftime("%Y-%m-%d %H:%M:%S")
+            out[column.name] = v
+        return out
+
+    @staticmethod
+    def _parse_datetime(value: Any) -> datetime | None:
+        """容错地把 str/datetime 转成 datetime。"""
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return value
+        if isinstance(value, str):
+            try:
+                # 兼容 "2026-06-27T12:34:56" 与 "2026-06-27 12:34:56"
+                return datetime.fromisoformat(value.replace("T", " "))
+            except ValueError:
+                return None
+        return None
+
+    # ============================================================
+    # Ticket CRUD
+    # ============================================================
+
     async def save_ticket(self, ticket_data: dict[str, Any]) -> None:
-        """保存或更新工单记录。"""
-        async with self.connection() as conn:
-            references = ticket_data.get("references")
-            if "references" not in ticket_data:
-                cursor = await conn.execute(
-                    "SELECT references_json FROM tickets WHERE ticket_id = ?",
-                    (ticket_data.get("ticket_id"),),
-                )
-                row = await cursor.fetchone()
-                references_json = row["references_json"] if row else None
-            else:
-                references_json = json.dumps(references or [], ensure_ascii=False)
+        """保存或更新工单。
 
-            await conn.execute(
-                """INSERT OR REPLACE INTO tickets (
-                    ticket_id, user_id, content, category, priority,
-                    processing_result, references_json, review_score, retry_count, status,
-                    error, resolved_at, satisfied, token_count,
-                    tool_call_count, total_duration
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    ticket_data.get("ticket_id"),
-                    ticket_data.get("user_id"),
-                    ticket_data.get("content"),
-                    ticket_data.get("category"),
-                    ticket_data.get("priority"),
-                    ticket_data.get("processing_result"),
-                    references_json,
-                    ticket_data.get("review_score"),
-                    ticket_data.get("retry_count", 0),
-                    ticket_data.get("status", "received"),
-                    ticket_data.get("error"),
-                    ticket_data.get("resolved_at"),
-                    ticket_data.get("satisfied"),
-                    ticket_data.get("token_count", 0),
-                    ticket_data.get("tool_call_count", 0),
-                    ticket_data.get("total_duration", 0.0),
-                ),
-            )
-            await conn.commit()
+        若 ticket_data 中不含 references 字段，保留既有 references_json。
+        """
+        async with self._session() as session:
+            ticket_id = ticket_data.get("ticket_id")
+            existing = await session.get(TicketORM, ticket_id) if ticket_id else None
+
+            references_in_dict = "references" in ticket_data
+            if existing is None:
+                # INSERT 分支
+                references_value = ticket_data.get("references")
+                references_json = (
+                    json.dumps(references_value or [], ensure_ascii=False)
+                    if references_in_dict
+                    else None
+                )
+                data = {
+                    "ticket_id": ticket_data.get("ticket_id"),
+                    "user_id": ticket_data.get("user_id"),
+                    "content": ticket_data.get("content"),
+                    "category": ticket_data.get("category"),
+                    "priority": ticket_data.get("priority"),
+                    "processing_result": ticket_data.get("processing_result"),
+                    "references_json": references_json,
+                    "review_score": ticket_data.get("review_score"),
+                    "retry_count": ticket_data.get("retry_count", 0),
+                    "status": ticket_data.get("status", "received"),
+                    "error": ticket_data.get("error"),
+                    "resolved_at": self._parse_datetime(ticket_data.get("resolved_at")),
+                    "satisfied": ticket_data.get("satisfied"),
+                    "token_count": ticket_data.get("token_count", 0),
+                    "tool_call_count": ticket_data.get("tool_call_count", 0),
+                    "total_duration": ticket_data.get("total_duration", 0.0),
+                    "created_at": self._parse_datetime(ticket_data.get("created_at")),
+                }
+                session.add(TicketORM(**data))
+            else:
+                # UPDATE 分支
+                fields = [
+                    "user_id", "content", "category", "priority",
+                    "processing_result", "review_score", "retry_count", "status",
+                    "error", "resolved_at", "satisfied", "token_count",
+                    "tool_call_count", "total_duration",
+                ]
+                for k in fields:
+                    if k in ticket_data:
+                        v = ticket_data[k]
+                        if k == "resolved_at":
+                            v = self._parse_datetime(v)
+                        setattr(existing, k, v)
+                if references_in_dict:
+                    references_value = ticket_data.get("references")
+                    existing.references_json = json.dumps(
+                        references_value or [], ensure_ascii=False
+                    )
+                if "created_at" in ticket_data:
+                    existing.created_at = self._parse_datetime(ticket_data["created_at"])
+            await session.commit()
 
     async def get_ticket(self, ticket_id: str) -> dict[str, Any] | None:
-        """根据工单ID查询工单记录。"""
-        async with self.connection() as conn:
-            cursor = await conn.execute(
-                "SELECT * FROM tickets WHERE ticket_id = ?", (ticket_id,)
-            )
-            row = await cursor.fetchone()
-            return dict(row) if row else None
+        async with self._session() as session:
+            obj = await session.get(TicketORM, ticket_id)
+            return self._orm_to_dict(obj) if obj else None
 
     async def list_tickets(
         self,
@@ -224,199 +293,217 @@ class DatabaseManager:
         limit: int = 20,
         offset: int = 0,
     ) -> list[dict[str, Any]]:
-        """分页查询工单列表，可按状态和分类筛选。"""
-        async with self.connection() as conn:
-            query = "SELECT * FROM tickets WHERE 1=1"
-            params: list[Any] = []
+        async with self._session() as session:
+            stmt = select(TicketORM)
             if status:
-                query += " AND status = ?"
-                params.append(status)
+                stmt = stmt.where(TicketORM.status == status)
             if category:
-                query += " AND category = ?"
-                params.append(category)
-            query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
-            params.extend([limit, offset])
-            cursor = await conn.execute(query, params)
-            rows = await cursor.fetchall()
-            return [dict(row) for row in rows]
+                stmt = stmt.where(TicketORM.category == category)
+            stmt = stmt.order_by(TicketORM.created_at.desc()).limit(limit).offset(offset)
+            result = await session.execute(stmt)
+            return [self._orm_to_dict(o) for o in result.scalars().all()]
 
-    # User operations
+    # ============================================================
+    # User CRUD
+    # ============================================================
+
     async def get_user(self, user_id: str) -> dict[str, Any] | None:
-        """根据用户ID查询用户信息。"""
-        async with self.connection() as conn:
-            cursor = await conn.execute(
-                "SELECT * FROM users WHERE user_id = ?", (user_id,)
-            )
-            row = await cursor.fetchone()
-            return dict(row) if row else None
+        async with self._session() as session:
+            obj = await session.get(UserORM, user_id)
+            return self._orm_to_dict(obj) if obj else None
 
     async def save_user(self, user_data: dict[str, Any]) -> None:
-        """保存或更新用户信息。"""
-        async with self.connection() as conn:
-            await conn.execute(
-                """INSERT OR REPLACE INTO users (
-                    user_id, name, vip_level, preferred_category,
-                    avg_satisfaction, total_tickets, last_contact
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    user_data.get("user_id"),
-                    user_data.get("name"),
-                    user_data.get("vip_level", 0),
-                    user_data.get("preferred_category"),
-                    user_data.get("avg_satisfaction"),
-                    user_data.get("total_tickets", 0),
-                    user_data.get("last_contact"),
-                ),
-            )
-            await conn.commit()
+        async with self._session() as session:
+            user_id = user_data.get("user_id")
+            existing = await session.get(UserORM, user_id) if user_id else None
+            data = {
+                "name": user_data.get("name"),
+                "vip_level": user_data.get("vip_level", 0),
+                "preferred_category": user_data.get("preferred_category"),
+                "avg_satisfaction": user_data.get("avg_satisfaction"),
+                "total_tickets": user_data.get("total_tickets", 0),
+                "last_contact": self._parse_datetime(user_data.get("last_contact")),
+            }
+            if existing is None:
+                session.add(UserORM(user_id=user_id, **data))
+            else:
+                for k, v in data.items():
+                    setattr(existing, k, v)
+            await session.commit()
 
     async def get_user_tickets(
         self, user_id: str, limit: int = 5
     ) -> list[dict[str, Any]]:
-        """查询指定用户的最近工单列表。"""
-        async with self.connection() as conn:
-            cursor = await conn.execute(
-                "SELECT * FROM tickets WHERE user_id = ? ORDER BY created_at DESC LIMIT ?",
-                (user_id, limit),
+        async with self._session() as session:
+            stmt = (
+                select(TicketORM)
+                .where(TicketORM.user_id == user_id)
+                .order_by(TicketORM.created_at.desc())
+                .limit(limit)
             )
-            rows = await cursor.fetchall()
-            return [dict(row) for row in rows]
+            result = await session.execute(stmt)
+            return [self._orm_to_dict(o) for o in result.scalars().all()]
 
-    # Checkpoint operations
-    async def save_checkpoint(
-        self, checkpoint_id: str, ticket_id: str, state: dict[str, Any], expires_at: str
-    ) -> None:
-        """保存或更新检查点状态。"""
-        async with self.connection() as conn:
-            await conn.execute(
-                "INSERT OR REPLACE INTO checkpoints (checkpoint_id, ticket_id, state_json, expires_at) VALUES (?, ?, ?, ?)",
-                (
-                    checkpoint_id,
-                    ticket_id,
-                    json.dumps(state, ensure_ascii=False),
-                    expires_at,
-                ),
-            )
-            await conn.commit()
-
-    async def get_checkpoint(self, ticket_id: str) -> dict[str, Any] | None:
-        """根据工单ID查询未过期的检查点。"""
-        async with self.connection() as conn:
-            cursor = await conn.execute(
-                "SELECT * FROM checkpoints WHERE ticket_id = ? AND expires_at > datetime('now')",
-                (ticket_id,),
-            )
-            row = await cursor.fetchone()
-            if row:
-                result = dict(row)
-                result["state"] = json.loads(result["state_json"])
-                return result
-            return None
-
-    async def list_active_checkpoints(self) -> list[dict[str, Any]]:
-        """查询所有未过期的检查点列表。"""
-        async with self.connection() as conn:
-            cursor = await conn.execute(
-                "SELECT * FROM checkpoints WHERE expires_at > datetime('now')"
-            )
-            rows = await cursor.fetchall()
-            result = []
-            for row in rows:
-                item = dict(row)
-                item["state"] = json.loads(item["state_json"])
-                result.append(item)
-            return result
-
-    async def delete_checkpoint(self, ticket_id: str) -> None:
-        """根据工单ID删除检查点。"""
-        async with self.connection() as conn:
-            await conn.execute(
-                "DELETE FROM checkpoints WHERE ticket_id = ?", (ticket_id,)
-            )
-            await conn.commit()
-
-    async def cleanup_expired_checkpoints(self) -> int:
-        """清理已过期的检查点，返回删除数量。"""
-        async with self.connection() as conn:
-            cursor = await conn.execute(
-                "DELETE FROM checkpoints WHERE expires_at <= datetime('now')"
-            )
-            await conn.commit()
-            return cursor.rowcount
-
-    # Pattern operations
-    async def get_pattern(self, category: str) -> dict[str, Any] | None:
-        """根据分类查询使用次数最多的匹配模式。"""
-        async with self.connection() as conn:
-            cursor = await conn.execute(
-                "SELECT * FROM patterns WHERE category = ? ORDER BY usage_count DESC LIMIT 1",
-                (category,),
-            )
-            row = await cursor.fetchone()
-            return dict(row) if row else None
-
-    async def save_pattern(self, pattern_data: dict[str, Any]) -> None:
-        """保存或更新匹配模式记录。"""
-        async with self.connection() as conn:
-            await conn.execute(
-                """INSERT OR REPLACE INTO patterns (
-                    pattern_id, category, keywords, solution_template,
-                    success_rate, usage_count
-                ) VALUES (?, ?, ?, ?, ?, ?)""",
-                (
-                    pattern_data.get("pattern_id"),
-                    pattern_data.get("category"),
-                    pattern_data.get("keywords"),
-                    pattern_data.get("solution_template"),
-                    pattern_data.get("success_rate", 0.0),
-                    pattern_data.get("usage_count", 0),
-                ),
-            )
-            await conn.commit()
-
-    # Trace CRUD
+    # ============================================================
+    # Checkpoint CRUD
     # ============================================================
 
-    async def save_trace(self, trace_data: dict[str, Any]) -> None:
-        """保存或更新 trace 记录。"""
-        cols = [
-            "trace_id", "ticket_id", "status", "start_time",
-            "end_time", "duration", "total_tokens", "total_tool_calls",
-            "node_count", "error",
-        ]
-        placeholders = ", ".join(["?"] * len(cols))
-        col_str = ", ".join(cols)
-        values = [trace_data.get(c) for c in cols]
-        async with self.connection() as conn:
-            await conn.execute(
-                f"INSERT OR REPLACE INTO traces ({col_str}) VALUES ({placeholders})",
-                values,
+    async def save_checkpoint(
+        self,
+        checkpoint_id: str,
+        ticket_id: str,
+        state: dict[str, Any],
+        expires_at: str,
+    ) -> None:
+        async with self._session() as session:
+            existing = await session.scalar(
+                select(CheckpointORM).where(CheckpointORM.ticket_id == ticket_id)
             )
-            await conn.commit()
+            expires_dt = self._parse_datetime(expires_at)
+            state_json = json.dumps(state, ensure_ascii=False)
+            if existing is None:
+                session.add(
+                    CheckpointORM(
+                        checkpoint_id=checkpoint_id,
+                        ticket_id=ticket_id,
+                        state_json=state_json,
+                        expires_at=expires_dt,
+                    )
+                )
+            else:
+                existing.checkpoint_id = checkpoint_id
+                existing.state_json = state_json
+                existing.expires_at = expires_dt
+            await session.commit()
+
+    async def get_checkpoint(self, ticket_id: str) -> dict[str, Any] | None:
+        async with self._session() as session:
+            now = datetime.utcnow()
+            stmt = select(CheckpointORM).where(
+                CheckpointORM.ticket_id == ticket_id,
+                CheckpointORM.expires_at > now,
+            )
+            obj = await session.scalar(stmt)
+            if not obj:
+                return None
+            result = self._orm_to_dict(obj)
+            result["state"] = json.loads(result["state_json"])
+            return result
+
+    async def list_active_checkpoints(self) -> list[dict[str, Any]]:
+        async with self._session() as session:
+            now = datetime.utcnow()
+            stmt = select(CheckpointORM).where(CheckpointORM.expires_at > now)
+            result = await session.execute(stmt)
+            out = []
+            for obj in result.scalars().all():
+                d = self._orm_to_dict(obj)
+                d["state"] = json.loads(d["state_json"])
+                out.append(d)
+            return out
+
+    async def delete_checkpoint(self, ticket_id: str) -> None:
+        async with self._session() as session:
+            await session.execute(
+                CheckpointORM.__table__.delete().where(
+                    CheckpointORM.ticket_id == ticket_id
+                )
+            )
+            await session.commit()
+
+    async def cleanup_expired_checkpoints(self) -> int:
+        async with self._session() as session:
+            now = datetime.utcnow()
+            result = await session.execute(
+                CheckpointORM.__table__.delete().where(CheckpointORM.expires_at <= now)
+            )
+            await session.commit()
+            return result.rowcount or 0
+
+    # ============================================================
+    # Pattern CRUD
+    # ============================================================
+
+    async def get_pattern(self, category: str) -> dict[str, Any] | None:
+        async with self._session() as session:
+            stmt = (
+                select(PatternORM)
+                .where(PatternORM.category == category)
+                .order_by(PatternORM.usage_count.desc())
+                .limit(1)
+            )
+            obj = await session.scalar(stmt)
+            return self._orm_to_dict(obj) if obj else None
+
+    async def save_pattern(self, pattern_data: dict[str, Any]) -> None:
+        async with self._session() as session:
+            pid = pattern_data.get("pattern_id")
+            existing = await session.get(PatternORM, pid) if pid else None
+            data = {
+                "category": pattern_data.get("category"),
+                "keywords": pattern_data.get("keywords"),
+                "solution_template": pattern_data.get("solution_template"),
+                "success_rate": pattern_data.get("success_rate", 0.0),
+                "usage_count": pattern_data.get("usage_count", 0),
+            }
+            if existing is None:
+                session.add(PatternORM(pattern_id=pid, **data))
+            else:
+                for k, v in data.items():
+                    setattr(existing, k, v)
+            await session.commit()
+
+    # ============================================================
+    # Trace & Span CRUD
+    # ============================================================
+
+    _TRACE_COLS = [
+        "trace_id", "ticket_id", "status", "start_time",
+        "end_time", "duration", "total_tokens", "total_tool_calls",
+        "node_count", "error",
+    ]
+    _SPAN_COLS = [
+        "span_id", "trace_id", "parent_span_id", "span_type",
+        "name", "status", "input_data", "output_data",
+        "start_time", "end_time", "duration", "metadata",
+    ]
+
+    async def save_trace(self, trace_data: dict[str, Any]) -> None:
+        async with self._session() as session:
+            tid = trace_data.get("trace_id")
+            existing = await session.get(TraceORM, tid) if tid else None
+            data = {c: trace_data.get(c) for c in self._TRACE_COLS if c != "trace_id"}
+            if existing is None:
+                session.add(TraceORM(trace_id=tid, **data))
+            else:
+                for k, v in data.items():
+                    setattr(existing, k, v)
+            await session.commit()
 
     async def get_trace_by_ticket(self, ticket_id: str) -> dict[str, Any] | None:
-        """按 ticket_id 查询 trace。"""
-        async with self.connection() as conn:
-            cursor = await conn.execute(
-                """
-                SELECT
-                    tr.*,
-                    tk.content AS ticket_content,
-                    tk.category AS ticket_category,
-                    tk.priority AS ticket_priority,
-                    tk.processing_result AS ticket_result,
-                    tk.review_score AS ticket_review_score,
-                    tk.references_json AS ticket_references_json
-                FROM traces tr
-                LEFT JOIN tickets tk ON tk.ticket_id = tr.ticket_id
-                WHERE tr.ticket_id = ?
-                ORDER BY tr.start_time DESC
-                LIMIT 1
-                """,
-                (ticket_id,),
+        async with self._session() as session:
+            stmt = (
+                select(TraceORM, TicketORM)
+                .outerjoin(TicketORM, TicketORM.ticket_id == TraceORM.ticket_id)
+                .where(TraceORM.ticket_id == ticket_id)
+                .order_by(TraceORM.start_time.desc())
+                .limit(1)
             )
-            row = await cursor.fetchone()
-            return dict(row) if row else None
+            row = (await session.execute(stmt)).first()
+            if not row:
+                return None
+            trace_obj, ticket_obj = row
+            result = self._orm_to_dict(trace_obj)
+            if ticket_obj:
+                result.update({
+                    "ticket_content": ticket_obj.content,
+                    "ticket_category": ticket_obj.category,
+                    "ticket_priority": ticket_obj.priority,
+                    "ticket_result": ticket_obj.processing_result,
+                    "ticket_review_score": ticket_obj.review_score,
+                    "ticket_references_json": ticket_obj.references_json,
+                })
+            return result
 
     async def list_traces(
         self,
@@ -424,132 +511,119 @@ class DatabaseManager:
         limit: int = 20,
         offset: int = 0,
     ) -> list[dict[str, Any]]:
-        """查询 trace 列表，按 start_time DESC 排序。"""
-        query = """
-            SELECT
-                tr.*,
-                tk.content AS ticket_content,
-                tk.category AS ticket_category,
-                tk.priority AS ticket_priority,
-                tk.processing_result AS ticket_result,
-                tk.review_score AS ticket_review_score,
-                tk.references_json AS ticket_references_json
-            FROM traces tr
-            LEFT JOIN tickets tk ON tk.ticket_id = tr.ticket_id
-        """
-        params: list[Any] = []
-        if status:
-            query += " WHERE tr.status = ?"
-            params.append(status)
-        query += " ORDER BY tr.start_time DESC LIMIT ? OFFSET ?"
-        params.extend([limit, offset])
-        async with self.connection() as conn:
-            cursor = await conn.execute(query, params)
-            rows = await cursor.fetchall()
-            return [dict(row) for row in rows]
+        async with self._session() as session:
+            stmt = (
+                select(TraceORM, TicketORM)
+                .outerjoin(TicketORM, TicketORM.ticket_id == TraceORM.ticket_id)
+            )
+            if status:
+                stmt = stmt.where(TraceORM.status == status)
+            stmt = stmt.order_by(TraceORM.start_time.desc()).limit(limit).offset(offset)
+            rows = (await session.execute(stmt)).all()
+            out = []
+            for trace_obj, ticket_obj in rows:
+                d = self._orm_to_dict(trace_obj)
+                if ticket_obj:
+                    d.update({
+                        "ticket_content": ticket_obj.content,
+                        "ticket_category": ticket_obj.category,
+                        "ticket_priority": ticket_obj.priority,
+                        "ticket_result": ticket_obj.processing_result,
+                        "ticket_review_score": ticket_obj.review_score,
+                        "ticket_references_json": ticket_obj.references_json,
+                    })
+                out.append(d)
+            return out
 
     async def count_traces(self, status: str | None = None) -> int:
-        """统计 trace 总数，用于分页。"""
-        query = "SELECT COUNT(*) as total FROM traces"
-        params: list[Any] = []
-        if status:
-            query += " WHERE status = ?"
-            params.append(status)
-        async with self.connection() as conn:
-            cursor = await conn.execute(query, params)
-            row = await cursor.fetchone()
-            return int(row["total"]) if row else 0
+        async with self._session() as session:
+            stmt = select(func.count()).select_from(TraceORM)
+            if status:
+                stmt = stmt.where(TraceORM.status == status)
+            return int((await session.execute(stmt)).scalar() or 0)
 
     async def get_trace_stats(self, trace_id: str) -> dict[str, Any] | None:
-        """获取 trace 的耗时统计。"""
-        trace = None
-        async with self.connection() as conn:
-            cursor = await conn.execute(
-                "SELECT * FROM traces WHERE trace_id = ?",
-                (trace_id,),
-            )
-            row = await cursor.fetchone()
-            if not row:
+        async with self._session() as session:
+            trace_obj = await session.get(TraceORM, trace_id)
+            if not trace_obj:
                 return None
-            trace = dict(row)
+            result = self._orm_to_dict(trace_obj)
 
             # 按 span_type 聚合
-            cursor = await conn.execute(
-                "SELECT span_type, COUNT(*) as count, "
-                "AVG(duration) as avg_duration, MAX(duration) as max_duration "
-                "FROM spans WHERE trace_id = ? AND duration IS NOT NULL "
-                "GROUP BY span_type",
-                (trace_id,),
+            stmt = (
+                select(
+                    SpanORM.span_type,
+                    func.count().label("count"),
+                    func.avg(SpanORM.duration).label("avg_duration"),
+                    func.max(SpanORM.duration).label("max_duration"),
+                )
+                .where(SpanORM.trace_id == trace_id, SpanORM.duration.is_not(None))
+                .group_by(SpanORM.span_type)
             )
             by_type = {}
-            for r in await cursor.fetchall():
-                d = dict(r)
-                by_type[d["span_type"]] = {
-                    "count": d["count"],
-                    "avg_duration": round(d["avg_duration"], 4),
-                    "max_duration": round(d["max_duration"], 4),
+            for r in (await session.execute(stmt)).all():
+                by_type[r.span_type] = {
+                    "count": r.count,
+                    "avg_duration": round(float(r.avg_duration), 4) if r.avg_duration else 0,
+                    "max_duration": round(float(r.max_duration), 4) if r.max_duration else 0,
                 }
-            trace["by_type"] = by_type
+            result["by_type"] = by_type
 
             # 最慢的 5 个 span
-            cursor = await conn.execute(
-                "SELECT name, span_type, duration FROM spans "
-                "WHERE trace_id = ? AND duration IS NOT NULL "
-                "ORDER BY duration DESC LIMIT 5",
-                (trace_id,),
+            slow_stmt = (
+                select(SpanORM.name, SpanORM.span_type, SpanORM.duration)
+                .where(SpanORM.trace_id == trace_id, SpanORM.duration.is_not(None))
+                .order_by(SpanORM.duration.desc())
+                .limit(5)
             )
-            trace["slowest_spans"] = [dict(r) for r in await cursor.fetchall()]
-
-        return trace
+            result["slowest_spans"] = [
+                {"name": r.name, "span_type": r.span_type, "duration": r.duration}
+                for r in (await session.execute(slow_stmt)).all()
+            ]
+            return result
 
     async def save_span(self, span_data: dict[str, Any]) -> None:
-        """保存 span 记录。"""
-        cols = [
-            "span_id", "trace_id", "parent_span_id", "span_type",
-            "name", "status", "input_data", "output_data",
-            "start_time", "end_time", "duration", "metadata",
-        ]
-        placeholders = ", ".join(["?"] * len(cols))
-        col_str = ", ".join(cols)
-        values = [span_data.get(c) for c in cols]
-        async with self.connection() as conn:
-            await conn.execute(
-                f"INSERT OR REPLACE INTO spans ({col_str}) VALUES ({placeholders})",
-                values,
-            )
-            await conn.commit()
+        async with self._session() as session:
+            sid = span_data.get("span_id")
+            existing = await session.get(SpanORM, sid) if sid else None
+            data = {c: span_data.get(c) for c in self._SPAN_COLS if c != "span_id"}
+            # DB 列名 metadata → ORM 属性名 metadata_（避免与 Base.metadata 冲突）
+            if "metadata" in data:
+                data["metadata_"] = data.pop("metadata")
+            if existing is None:
+                session.add(SpanORM(span_id=sid, **data))
+            else:
+                for k, v in data.items():
+                    setattr(existing, k, v)
+            await session.commit()
 
     async def update_span(self, span_id: str, updates: dict[str, Any]) -> None:
-        """更新 span 记录的部分字段。"""
-        set_parts = [f"{k} = ?" for k in updates]
-        values = list(updates.values()) + [span_id]
-        async with self.connection() as conn:
-            await conn.execute(
-                f"UPDATE spans SET {', '.join(set_parts)} WHERE span_id = ?",
-                values,
-            )
-            await conn.commit()
+        async with self._session() as session:
+            obj = await session.get(SpanORM, span_id)
+            if obj is None:
+                return
+            for k, v in updates.items():
+                if k == "metadata":
+                    setattr(obj, "metadata_", v)
+                else:
+                    setattr(obj, k, v)
+            await session.commit()
 
     async def get_spans_by_trace(self, trace_id: str) -> list[dict[str, Any]]:
-        """查询 trace 的所有 span，按 start_time 排序。"""
-        async with self.connection() as conn:
-            cursor = await conn.execute(
-                "SELECT * FROM spans WHERE trace_id = ? ORDER BY start_time",
-                (trace_id,),
+        async with self._session() as session:
+            stmt = (
+                select(SpanORM)
+                .where(SpanORM.trace_id == trace_id)
+                .order_by(SpanORM.start_time)
             )
-            rows = await cursor.fetchall()
-            return [dict(row) for row in rows]
+            result = await session.execute(stmt)
+            return [self._orm_to_dict(o) for o in result.scalars().all()]
 
+    # ============================================================
     # Human Review CRUD
     # ============================================================
 
     async def create_pending_review(self, review: dict[str, Any]) -> None:
-        """创建待审核单。
-
-        Args:
-            review: 包含 review_id / ticket_id / trigger_type / trigger_reason /
-                ai_suggestion 等字段的字典
-        """
         ai_suggestion_raw = review.get("ai_suggestion")
         if isinstance(ai_suggestion_raw, dict):
             ai_suggestion_json = json.dumps(ai_suggestion_raw, ensure_ascii=False)
@@ -558,46 +632,35 @@ class DatabaseManager:
         else:
             ai_suggestion_json = str(ai_suggestion_raw)
 
-        async with self.connection() as conn:
-            await conn.execute(
-                """INSERT INTO human_reviews (
-                    review_id, ticket_id, trigger_type, trigger_reason,
-                    ai_suggestion, status, created_at
-                ) VALUES (?, ?, ?, ?, ?, 'pending', ?)""",
-                (
-                    review.get("review_id"),
-                    review.get("ticket_id"),
-                    review.get("trigger_type"),
-                    review.get("trigger_reason"),
-                    ai_suggestion_json,
-                    review.get("created_at"),
-                ),
+        async with self._session() as session:
+            obj = HumanReviewORM(
+                review_id=review.get("review_id"),
+                ticket_id=review.get("ticket_id"),
+                trigger_type=review.get("trigger_type"),
+                trigger_reason=review.get("trigger_reason"),
+                ai_suggestion=ai_suggestion_json,
+                status="pending",
+                created_at=self._parse_datetime(review.get("created_at")) or datetime.utcnow(),
             )
-            await conn.commit()
+            session.add(obj)
+            await session.commit()
 
     async def get_pending_review_by_ticket(
         self, ticket_id: str
     ) -> dict[str, Any] | None:
-        """按工单 ID 查询最新待审核记录。"""
-        async with self.connection() as conn:
-            cursor = await conn.execute(
-                "SELECT * FROM human_reviews WHERE ticket_id = ? "
-                "ORDER BY created_at DESC LIMIT 1",
-                (ticket_id,),
+        async with self._session() as session:
+            stmt = (
+                select(HumanReviewORM)
+                .where(HumanReviewORM.ticket_id == ticket_id)
+                .order_by(HumanReviewORM.created_at.desc())
+                .limit(1)
             )
-            row = await cursor.fetchone()
-            return dict(row) if row else None
+            obj = await session.scalar(stmt)
+            return self._orm_to_dict(obj) if obj else None
 
     async def update_review_decision(
         self, review_id: str, updates: dict[str, Any]
     ) -> None:
-        """更新审核单的决策信息。
-
-        Args:
-            review_id: 审核单 ID
-            updates: 包含 decision / decision_reason / rewritten_result /
-                reviewer_id / status / decided_at 等字段的字典
-        """
         allowed = {
             "decision", "decision_reason", "rewritten_result",
             "reviewer_id", "status", "decided_at",
@@ -607,21 +670,22 @@ class DatabaseManager:
             logger.warning(
                 f"update_review_decision 收到未知字段: {unknown}，将被忽略"
             )
-        set_parts = [f"{k} = ?" for k in updates if k in allowed]
-        values = [v for k, v in updates.items() if k in allowed]
-        if not set_parts:
+        valid_updates = {k: v for k, v in updates.items() if k in allowed}
+        if not valid_updates:
             logger.warning(
                 f"update_review_decision 无有效更新字段, review_id={review_id}"
             )
             return
-        values.append(review_id)
-        async with self.connection() as conn:
-            await conn.execute(
-                f"UPDATE human_reviews SET {', '.join(set_parts)} "
-                "WHERE review_id = ?",
-                values,
-            )
-            await conn.commit()
+        async with self._session() as session:
+            obj = await session.get(HumanReviewORM, review_id)
+            if obj is None:
+                logger.warning(f"update_review_decision 未找到 review_id={review_id}")
+                return
+            for k, v in valid_updates.items():
+                if k == "decided_at":
+                    v = self._parse_datetime(v)
+                setattr(obj, k, v)
+            await session.commit()
 
     async def list_pending_reviews(
         self,
@@ -630,62 +694,58 @@ class DatabaseManager:
         limit: int = 20,
         offset: int = 0,
     ) -> list[dict[str, Any]]:
-        """分页查询审核单列表，可按状态和触发类型筛选。"""
-        query = "SELECT * FROM human_reviews WHERE 1=1"
-        params: list[Any] = []
-        if status:
-            query += " AND status = ?"
-            params.append(status)
-        if trigger_type:
-            query += " AND trigger_type = ?"
-            params.append(trigger_type)
-        query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
-        params.extend([limit, offset])
-        async with self.connection() as conn:
-            cursor = await conn.execute(query, params)
-            rows = await cursor.fetchall()
-            return [dict(row) for row in rows]
+        async with self._session() as session:
+            stmt = select(HumanReviewORM)
+            if status:
+                stmt = stmt.where(HumanReviewORM.status == status)
+            if trigger_type:
+                stmt = stmt.where(HumanReviewORM.trigger_type == trigger_type)
+            stmt = stmt.order_by(HumanReviewORM.created_at.desc()).limit(limit).offset(offset)
+            result = await session.execute(stmt)
+            return [self._orm_to_dict(o) for o in result.scalars().all()]
 
     async def list_reviews_by_ticket(self, ticket_id: str) -> list[dict[str, Any]]:
-        """查询指定工单的全部审核记录。"""
-        async with self.connection() as conn:
-            cursor = await conn.execute(
-                "SELECT * FROM human_reviews WHERE ticket_id = ? "
-                "ORDER BY created_at ASC",
-                (ticket_id,),
+        async with self._session() as session:
+            stmt = (
+                select(HumanReviewORM)
+                .where(HumanReviewORM.ticket_id == ticket_id)
+                .order_by(HumanReviewORM.created_at.asc())
             )
-            rows = await cursor.fetchall()
-            return [dict(row) for row in rows]
+            result = await session.execute(stmt)
+            return [self._orm_to_dict(o) for o in result.scalars().all()]
 
     async def get_review_stats(self) -> dict[str, Any]:
-        """统计审核单整体情况：总数、待处理、已处理及按决策/触发类型分布。"""
-        async with self.connection() as conn:
-            cursor = await conn.execute(
-                "SELECT COUNT(*) as total FROM human_reviews"
-            )
-            total = (await cursor.fetchone())["total"]
+        async with self._session() as session:
+            total = int((await session.execute(
+                select(func.count()).select_from(HumanReviewORM)
+            )).scalar() or 0)
+            pending = int((await session.execute(
+                select(func.count()).select_from(HumanReviewORM)
+                .where(HumanReviewORM.status == "pending")
+            )).scalar() or 0)
+            decided = int((await session.execute(
+                select(func.count()).select_from(HumanReviewORM)
+                .where(HumanReviewORM.status == "decided")
+            )).scalar() or 0)
 
-            cursor = await conn.execute(
-                "SELECT COUNT(*) as cnt FROM human_reviews WHERE status = 'pending'"
+            stmt_decision = (
+                select(HumanReviewORM.decision, func.count().label("cnt"))
+                .where(HumanReviewORM.decision.is_not(None))
+                .group_by(HumanReviewORM.decision)
             )
-            pending = (await cursor.fetchone())["cnt"]
+            by_decision = {
+                r.decision: r.cnt
+                for r in (await session.execute(stmt_decision)).all()
+            }
 
-            cursor = await conn.execute(
-                "SELECT COUNT(*) as cnt FROM human_reviews WHERE status = 'decided'"
+            stmt_trigger = (
+                select(HumanReviewORM.trigger_type, func.count().label("cnt"))
+                .group_by(HumanReviewORM.trigger_type)
             )
-            decided = (await cursor.fetchone())["cnt"]
-
-            cursor = await conn.execute(
-                "SELECT decision, COUNT(*) as cnt FROM human_reviews "
-                "WHERE decision IS NOT NULL GROUP BY decision"
-            )
-            by_decision = {row["decision"]: row["cnt"] for row in await cursor.fetchall()}
-
-            cursor = await conn.execute(
-                "SELECT trigger_type, COUNT(*) as cnt FROM human_reviews "
-                "GROUP BY trigger_type"
-            )
-            by_trigger = {row["trigger_type"]: row["cnt"] for row in await cursor.fetchall()}
+            by_trigger = {
+                r.trigger_type: r.cnt
+                for r in (await session.execute(stmt_trigger)).all()
+            }
 
         return {
             "total": total,
@@ -703,39 +763,37 @@ class DatabaseManager:
         limit: int = 20,
         offset: int = 0,
     ) -> list[dict[str, Any]]:
-        """联表查询 pending 审核单 + 工单快照，供审核工作台队列展示。
-
-        支持按 trigger_type / category / priority 过滤；priority 排序遵循
-        P0 > P1 > P2 > P3（自定义 CASE 排序）。
-        """
-        query = (
-            "SELECT hr.*, tk.content AS ticket_content, "
-            "tk.category AS ticket_category, tk.priority AS ticket_priority "
-            "FROM human_reviews hr "
-            "LEFT JOIN tickets tk ON hr.ticket_id = tk.ticket_id "
-            "WHERE hr.status = 'pending'"
+        """联表查询 pending 审核单 + 工单快照。"""
+        priority_order = case(
+            (TicketORM.priority == "P0", 0),
+            (TicketORM.priority == "P1", 1),
+            (TicketORM.priority == "P2", 2),
+            (TicketORM.priority == "P3", 3),
+            else_=9,
         )
-        params: list[Any] = []
-        if trigger_type:
-            query += " AND hr.trigger_type = ?"
-            params.append(trigger_type)
-        if category:
-            query += " AND tk.category = ?"
-            params.append(category)
-        if priority:
-            query += " AND tk.priority = ?"
-            params.append(priority)
-        # 排序：优先级 P0>P1>P2>P3，其次 waiting_seconds 降序（created_at 升序）
-        query += (
-            " ORDER BY CASE tk.priority WHEN 'P0' THEN 0 WHEN 'P1' THEN 1 "
-            "WHEN 'P2' THEN 2 WHEN 'P3' THEN 3 ELSE 9 END ASC, "
-            "hr.created_at ASC LIMIT ? OFFSET ?"
-        )
-        params.extend([limit, offset])
-        async with self.connection() as conn:
-            cursor = await conn.execute(query, params)
-            rows = await cursor.fetchall()
-            return [dict(row) for row in rows]
+        async with self._session() as session:
+            stmt = (
+                select(HumanReviewORM, TicketORM)
+                .outerjoin(TicketORM, TicketORM.ticket_id == HumanReviewORM.ticket_id)
+                .where(HumanReviewORM.status == "pending")
+            )
+            if trigger_type:
+                stmt = stmt.where(HumanReviewORM.trigger_type == trigger_type)
+            if category:
+                stmt = stmt.where(TicketORM.category == category)
+            if priority:
+                stmt = stmt.where(TicketORM.priority == priority)
+            stmt = stmt.order_by(priority_order.asc(), HumanReviewORM.created_at.asc())
+            stmt = stmt.limit(limit).offset(offset)
+            rows = (await session.execute(stmt)).all()
+            out = []
+            for hr, tk in rows:
+                d = self._orm_to_dict(hr)
+                d["ticket_content"] = tk.content if tk else None
+                d["ticket_category"] = tk.category if tk else None
+                d["ticket_priority"] = tk.priority if tk else None
+                out.append(d)
+            return out
 
     async def count_pending_reviews(
         self,
@@ -743,77 +801,85 @@ class DatabaseManager:
         category: str | None = None,
         priority: str | None = None,
     ) -> int:
-        """统计符合筛选条件的 pending 审核单总数（用于分页）。"""
-        query = (
-            "SELECT COUNT(*) AS cnt FROM human_reviews hr "
-            "LEFT JOIN tickets tk ON hr.ticket_id = tk.ticket_id "
-            "WHERE hr.status = 'pending'"
-        )
-        params: list[Any] = []
-        if trigger_type:
-            query += " AND hr.trigger_type = ?"
-            params.append(trigger_type)
-        if category:
-            query += " AND tk.category = ?"
-            params.append(category)
-        if priority:
-            query += " AND tk.priority = ?"
-            params.append(priority)
-        async with self.connection() as conn:
-            cursor = await conn.execute(query, params)
-            row = await cursor.fetchone()
-            return int(row["cnt"]) if row else 0
+        async with self._session() as session:
+            stmt = (
+                select(func.count())
+                .select_from(HumanReviewORM)
+                .outerjoin(TicketORM, TicketORM.ticket_id == HumanReviewORM.ticket_id)
+                .where(HumanReviewORM.status == "pending")
+            )
+            if trigger_type:
+                stmt = stmt.where(HumanReviewORM.trigger_type == trigger_type)
+            if category:
+                stmt = stmt.where(TicketORM.category == category)
+            if priority:
+                stmt = stmt.where(TicketORM.priority == priority)
+            return int((await session.execute(stmt)).scalar() or 0)
 
     async def get_review_workbench_stats(self) -> dict[str, Any]:
-        """审核工作台统计：待处理数、今日已决策数、决策分布、平均决策时长、AI 采纳率。"""
-        from datetime import date
+        """审核工作台统计。
 
-        today_start = f"{date.today().isoformat()}T00:00:00"
+        平均决策时长通过 Python 端计算，避免跨方言日期函数差异。
+        """
+        today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
 
-        async with self.connection() as conn:
-            cursor = await conn.execute(
-                "SELECT COUNT(*) AS cnt FROM human_reviews WHERE status = 'pending'"
-            )
-            pending_count = int((await cursor.fetchone())["cnt"])
+        async with self._session() as session:
+            pending_count = int((await session.execute(
+                select(func.count()).select_from(HumanReviewORM)
+                .where(HumanReviewORM.status == "pending")
+            )).scalar() or 0)
 
-            cursor = await conn.execute(
-                "SELECT COUNT(*) AS cnt FROM human_reviews "
-                "WHERE status = 'decided' AND decided_at >= ?",
-                (today_start,),
-            )
-            decided_today = int((await cursor.fetchone())["cnt"])
+            decided_today = int((await session.execute(
+                select(func.count()).select_from(HumanReviewORM)
+                .where(
+                    HumanReviewORM.status == "decided",
+                    HumanReviewORM.decided_at >= today_start,
+                )
+            )).scalar() or 0)
 
-            cursor = await conn.execute(
-                "SELECT decision, COUNT(*) AS cnt FROM human_reviews "
-                "WHERE status = 'decided' AND decision IS NOT NULL "
-                "GROUP BY decision"
-            )
             decision_distribution = {
-                row["decision"]: int(row["cnt"]) for row in await cursor.fetchall()
+                r.decision: int(r.cnt)
+                for r in (await session.execute(
+                    select(HumanReviewORM.decision, func.count().label("cnt"))
+                    .where(
+                        HumanReviewORM.status == "decided",
+                        HumanReviewORM.decision.is_not(None),
+                    )
+                    .group_by(HumanReviewORM.decision)
+                )).all()
             }
 
-            cursor = await conn.execute(
-                "SELECT AVG("
-                "(julianday(decided_at) - julianday(created_at)) * 86400"
-                ") AS avg_sec FROM human_reviews "
-                "WHERE status = 'decided' AND decided_at IS NOT NULL"
-            )
-            avg_row = await cursor.fetchone()
+            # 决策时长：Python 端算
+            decided_rows = (await session.execute(
+                select(HumanReviewORM.decided_at, HumanReviewORM.created_at)
+                .where(
+                    HumanReviewORM.status == "decided",
+                    HumanReviewORM.decided_at.is_not(None),
+                )
+            )).all()
+            durations = [
+                (r.decided_at - r.created_at).total_seconds()
+                for r in decided_rows
+                if r.decided_at and r.created_at
+            ]
             avg_decision_seconds = (
-                int(avg_row["avg_sec"]) if avg_row and avg_row["avg_sec"] else 0
+                int(sum(durations) / len(durations)) if durations else 0
             )
 
-            # AI 采纳率：decided 行中 decision == ai_suggestion.recommended_decision
-            cursor = await conn.execute(
-                "SELECT decision, ai_suggestion FROM human_reviews "
-                "WHERE status = 'decided' AND decision IS NOT NULL "
-                "AND ai_suggestion IS NOT NULL"
-            )
+            # AI 采纳率
+            adoption_rows = (await session.execute(
+                select(HumanReviewORM.decision, HumanReviewORM.ai_suggestion)
+                .where(
+                    HumanReviewORM.status == "decided",
+                    HumanReviewORM.decision.is_not(None),
+                    HumanReviewORM.ai_suggestion.is_not(None),
+                )
+            )).all()
             adopted = 0
             comparable = 0
-            for row in await cursor.fetchall():
+            for r in adoption_rows:
                 try:
-                    suggestion = json.loads(row["ai_suggestion"])
+                    suggestion = json.loads(r.ai_suggestion)
                 except (json.JSONDecodeError, TypeError):
                     continue
                 recommended = (
@@ -824,7 +890,7 @@ class DatabaseManager:
                 if not recommended:
                     continue
                 comparable += 1
-                if row["decision"] == recommended:
+                if r.decision == recommended:
                     adopted += 1
             ai_adoption_rate = (
                 round(adopted / comparable, 4) if comparable > 0 else 0.0
@@ -838,58 +904,63 @@ class DatabaseManager:
             "ai_adoption_rate": ai_adoption_rate,
         }
 
+    # ============================================================
     # Analytics
+    # ============================================================
+
     async def get_category_distribution(self) -> dict[str, int]:
-        """统计各分类的工单数量分布。"""
-        async with self.connection() as conn:
-            cursor = await conn.execute(
-                "SELECT category, COUNT(*) as count FROM tickets GROUP BY category"
+        async with self._session() as session:
+            stmt = (
+                select(TicketORM.category, func.count().label("cnt"))
+                .group_by(TicketORM.category)
             )
-            rows = await cursor.fetchall()
-            return {row["category"] or "uncategorized": row["count"] for row in rows}
+            return {
+                (r.category or "uncategorized"): r.cnt
+                for r in (await session.execute(stmt)).all()
+            }
 
     async def get_priority_distribution(self) -> dict[str, int]:
-        """统计各优先级的工单数量分布。"""
-        async with self.connection() as conn:
-            cursor = await conn.execute(
-                "SELECT priority, COUNT(*) as count FROM tickets GROUP BY priority"
+        async with self._session() as session:
+            stmt = (
+                select(TicketORM.priority, func.count().label("cnt"))
+                .group_by(TicketORM.priority)
             )
-            rows = await cursor.fetchall()
-            return {row["priority"] or "unassigned": row["count"] for row in rows}
+            return {
+                (r.priority or "unassigned"): r.cnt
+                for r in (await session.execute(stmt)).all()
+            }
 
     async def get_resolution_stats(self) -> dict[str, Any]:
-        """获取工单整体解决统计信息，包括总数、完成数、失败数、平均重试次数和成功率。"""
-        async with self.connection() as conn:
-            cursor = await conn.execute("SELECT COUNT(*) as total FROM tickets")
-            total = (await cursor.fetchone())["total"]
-
-            cursor = await conn.execute(
-                "SELECT COUNT(*) as completed FROM tickets WHERE status = 'completed'"
-            )
-            completed = (await cursor.fetchone())["completed"]
-
-            cursor = await conn.execute(
-                "SELECT COUNT(*) as failed FROM tickets WHERE status = 'failed'"
-            )
-            failed = (await cursor.fetchone())["failed"]
-
-            cursor = await conn.execute(
-                "SELECT AVG(retry_count) as avg_retries FROM tickets"
-            )
-            avg_retries = (await cursor.fetchone())["avg_retries"] or 0.0
-
+        async with self._session() as session:
+            total = int((await session.execute(
+                select(func.count()).select_from(TicketORM)
+            )).scalar() or 0)
+            completed = int((await session.execute(
+                select(func.count()).select_from(TicketORM)
+                .where(TicketORM.status == "completed")
+            )).scalar() or 0)
+            failed = int((await session.execute(
+                select(func.count()).select_from(TicketORM)
+                .where(TicketORM.status == "failed")
+            )).scalar() or 0)
+            avg_retries = (await session.execute(
+                select(func.avg(TicketORM.retry_count))
+            )).scalar()
             success_rate = completed / total if total > 0 else 0.0
 
             return {
                 "total": total,
                 "completed": completed,
                 "failed": failed,
-                "avg_retries": round(avg_retries, 2),
+                "avg_retries": round(float(avg_retries or 0), 2),
                 "success_rate": round(success_rate, 4),
             }
 
 
+# ============================================================
 # Global singleton
+# ============================================================
+
 _db_manager_instance: DatabaseManager | None = None
 
 
@@ -897,7 +968,7 @@ async def get_db_manager() -> DatabaseManager:
     global _db_manager_instance
     if _db_manager_instance is None:
         from src.multi_agent_system.config import Settings
-        _db_manager_instance = DatabaseManager(db_path=Settings().db_path)
+        _db_manager_instance = DatabaseManager(database_url=Settings().database_url)
         await _db_manager_instance.initialize()
     return _db_manager_instance
 
