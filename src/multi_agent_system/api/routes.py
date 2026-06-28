@@ -695,6 +695,53 @@ async def get_trace_stats(trace_id: str, request: Request) -> dict:
     return stats
 
 
+@router.get("/traces/{trace_id}/decisions")
+async def get_trace_decisions(trace_id: str, request: Request) -> dict:
+    """列出 trace 内的所有决策点（从 spans.metadata.decision 提取）。"""
+    db_manager = request.app.state.db_manager
+    spans = await db_manager.get_spans_by_trace(trace_id)
+    if not spans:
+        from fastapi.responses import JSONResponse
+        return JSONResponse(status_code=404, content={"detail": "Trace not found"})
+
+    decisions: list[dict[str, Any]] = []
+    for span in spans:
+        metadata = span.get("metadata")
+        if isinstance(metadata, str):
+            try:
+                metadata = json.loads(metadata)
+            except (json.JSONDecodeError, TypeError):
+                metadata = None
+        if not isinstance(metadata, dict):
+            continue
+        decision = metadata.get("decision")
+        if not isinstance(decision, dict):
+            continue
+        selection = decision.get("selection") or {}
+        options = decision.get("options") or []
+        decisions.append({
+            "span_id": span.get("span_id"),
+            "span_name": span.get("name"),
+            "span_type": span.get("span_type"),
+            "decision_type": decision.get("decision_type"),
+            "trigger": decision.get("trigger"),
+            "options_count": len(options),
+            "options": options,
+            "selection_value": selection.get("value"),
+            "confidence": selection.get("confidence"),
+            "reason": selection.get("reason"),
+            "start_time": span.get("start_time"),
+            "duration": span.get("duration"),
+        })
+
+    decisions.sort(key=lambda d: d.get("start_time") or 0)
+    return {
+        "trace_id": trace_id,
+        "decision_count": len(decisions),
+        "decisions": decisions,
+    }
+
+
 def _build_span_tree(spans: list[dict]) -> list[dict]:
     """将扁平 span 列表构建为嵌套树结构。"""
     span_map: dict[str, dict] = {}

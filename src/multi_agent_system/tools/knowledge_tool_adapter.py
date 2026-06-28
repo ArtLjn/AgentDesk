@@ -9,6 +9,46 @@ from src.multi_agent_system.core.tool_base import ToolBase, ToolRegistry
 __all__ = ["KnowledgeSearchToolAdapter", "register_knowledge_tool"]
 
 
+def _start_rag_span(query: str, top_k: int):
+    """在当前活跃 trace 下创建 RAG 检索子 span；无 trace 时返回 no-op。"""
+    from src.multi_agent_system.workflow.graph import _trace_manager, _active_trace_id
+    from src.multi_agent_system.core.trace import current_trace_id
+
+    if _trace_manager is None:
+        return _NoOpRagSpan()
+    trace_id = _active_trace_id or current_trace_id.get()
+    if trace_id is None:
+        return _NoOpRagSpan()
+    return _trace_manager.start_span(
+        name="knowledge_search",
+        span_type="tool_call",
+        trace_id=trace_id,
+        input_data={"query": query, "top_k": top_k},
+    )
+
+
+class _NoOpRagSpan:
+    """无 trace 时的空操作 RAG span。"""
+
+    span_id = ""
+    trace_id = ""
+
+    def set_output(self, data: dict[str, Any]) -> None:
+        pass
+
+    def set_metadata(self, data: dict[str, Any]) -> None:
+        pass
+
+    def set_status(self, status: str) -> None:
+        pass
+
+    async def __aenter__(self) -> "_NoOpRagSpan":
+        return self
+
+    async def __aexit__(self, *args: Any) -> bool:
+        return False
+
+
 class KnowledgeSearchParams(BaseModel):
     """知识库检索参数。"""
 
@@ -39,11 +79,35 @@ class KnowledgeSearchToolAdapter(ToolBase):
         score_threshold: float = 0.5,
     ) -> str:
         """执行知识库检索并格式化为 LLM 可读上下文。"""
-        results = self._knowledge_tool.search(
-            query=query,
-            top_k=top_k,
-            score_threshold=score_threshold,
-        )
+        async with _start_rag_span(query, top_k) as rag_span:
+            results = self._knowledge_tool.search(
+                query=query,
+                top_k=top_k,
+                score_threshold=score_threshold,
+            )
+            top_score = results[0]["score"] if results else 0.0
+            # 构造检索文档摘要（前端展示用）
+            retrieved_docs = [
+                {
+                    "title": (item.get("metadata") or {}).get("title") or "未命名文档",
+                    "category": (item.get("metadata") or {}).get("category") or "未分类",
+                    "score": round(item.get("score", 0.0), 4),
+                    "preview": (item.get("content") or "")[:160],
+                }
+                for item in results
+            ]
+            rag_span.set_metadata({"rag_stats": {
+                "hit_count": len(results),
+                "top_score": round(top_score, 4),
+                "score_threshold": score_threshold,
+                "query": query,
+                "retrieved_docs": retrieved_docs,
+            }})
+            rag_span.set_output({
+                "hit_count": len(results),
+                "retrieved_docs": retrieved_docs,
+            })
+
         if not results:
             return "未检索到相关知识片段。"
 

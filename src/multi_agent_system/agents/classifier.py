@@ -31,7 +31,7 @@ _CLASSIFIER_SYSTEM_PROMPT = """\
 
 注意：category 只能选一个，不要组合多个分类。
 请严格按照以下 JSON 格式输出，不要添加任何额外内容：
-{"category": "technical 或 billing 或 complaint 或 inquiry（只选一个）", "priority": "P0 或 P1 或 P2 或 P3（只选一个）", "reason": "分类和优先级判断的简要理由"}\
+{"category": "technical 或 billing 或 complaint 或 inquiry（只选一个）", "priority": "P0 或 P1 或 P2 或 P3（只选一个）", "confidence": 0.0~1.0 的置信度, "reason": "分类和优先级判断的简要理由"}\
 """
 
 # 关键词降级规则（与 graph.py 中的占位逻辑一致）
@@ -103,6 +103,17 @@ class ClassifierAgent:
         Returns:
             包含 category、priority、reason 的字典
         """
+        rule_result = (
+            self._match_keyword_rule(content, confidence=0.85)
+            if self._client is None
+            else None
+        )
+        if rule_result is not None:
+            logger.info(
+                "[Classifier] 命中本地关键词规则，跳过 LLM: "
+                f"{rule_result['category']}/{rule_result['priority']}"
+            )
+            return rule_result
         return await self._classify_by_llm(content)
 
     @with_retry(
@@ -156,6 +167,12 @@ class ClassifierAgent:
         category = result.get("category", "")
         priority = result.get("priority", "")
         reason = result.get("reason", "")
+        confidence_raw = result.get("confidence", 0.8)
+        try:
+            confidence = float(confidence_raw)
+            confidence = max(0.0, min(1.0, confidence))
+        except (TypeError, ValueError):
+            confidence = 0.8
 
         if category not in _VALID_CATEGORIES:
             logger.warning(f"LLM 返回非法分类 '{category}'，降级到 inquiry")
@@ -169,6 +186,7 @@ class ClassifierAgent:
             "category": category,
             "priority": priority,
             "reason": reason,
+            "confidence": confidence,
         }
 
     @staticmethod
@@ -181,19 +199,29 @@ class ClassifierAgent:
         Returns:
             分类结果字典
         """
-        for keyword, (category, priority) in _FALLBACK_RULES.items():
-            if keyword in content:
-                return {
-                    "category": category,
-                    "priority": priority,
-                    "reason": f"关键词匹配降级：匹配到 '{keyword}'",
-                }
+        rule_result = ClassifierAgent._match_keyword_rule(content, confidence=0.5)
+        if rule_result is not None:
+            return rule_result
 
         return {
             "category": TicketCategory.INQUIRY.value,
             "priority": TicketPriority.P3.value,
             "reason": "关键词匹配降级：未匹配到关键词，使用默认分类",
+            "confidence": 0.3,
         }
+
+    @staticmethod
+    def _match_keyword_rule(content: str, confidence: float) -> dict | None:
+        """按关键词规则分类，未匹配时返回 None。"""
+        for keyword, (category, priority) in _FALLBACK_RULES.items():
+            if keyword in content:
+                return {
+                    "category": category,
+                    "priority": priority,
+                    "reason": f"关键词规则匹配：匹配到 '{keyword}'",
+                    "confidence": confidence,
+                }
+        return None
 
     @staticmethod
     def create_from_settings() -> "ClassifierAgent":

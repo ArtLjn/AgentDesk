@@ -60,8 +60,10 @@ class SpanContext:
         self._output_data = data
 
     def set_metadata(self, data: dict[str, Any]) -> None:
-        """设置 span 元数据。"""
-        self._metadata = data
+        """合并写入 span 元数据（merge 模式，避免覆盖既有字段）。"""
+        if self._metadata is None:
+            self._metadata = {}
+        self._metadata.update(data)
 
     def set_status(self, status: str) -> None:
         """设置 span 状态（ok/error/fallback）。"""
@@ -213,6 +215,17 @@ class TraceManager:
             await conn.execute(
                 "UPDATE traces SET node_count = node_count + 1 WHERE trace_id = ?",
                 (trace_id,),
+            )
+            await conn.commit()
+
+    async def add_token_usage(self, trace_id: str, delta: int) -> None:
+        """累加 trace 的 total_tokens（修复 P0：原本永为 0）。"""
+        if delta <= 0:
+            return
+        async with self._db.connection() as conn:
+            await conn.execute(
+                "UPDATE traces SET total_tokens = total_tokens + ? WHERE trace_id = ?",
+                (delta, trace_id),
             )
             await conn.commit()
 

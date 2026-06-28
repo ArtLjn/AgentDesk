@@ -171,6 +171,53 @@ def _span(name: str, span_type: str = "node", **kwargs: Any):
     )
 
 
+def _build_classify_decision(
+    content: str,
+    category: str,
+    confidence: float | None,
+    reason: str,
+) -> dict[str, Any]:
+    """构造 classify 节点的 routing 决策记录。"""
+    options = [
+        {"value": c.value, "score": 0.0, "reason": "未选中"}
+        for c in TicketCategory
+    ]
+    for opt in options:
+        if opt["value"] == category:
+            opt["score"] = confidence if confidence is not None else 1.0
+            opt["reason"] = reason or "LLM 选择"
+    return {
+        "decision_type": "routing",
+        "trigger": {"content_preview": content[:200]},
+        "options": options,
+        "selection": {
+            "value": category,
+            "confidence": confidence if confidence is not None else 1.0,
+            "reason": reason or "LLM 选择",
+        },
+        "execution": {"downstream_node": "route"},
+    }
+
+
+def _build_review_decision(score: float, threshold: float) -> dict[str, Any]:
+    """构造 review 节点的 quality_gate 决策记录。"""
+    passed = score >= threshold
+    confidence = min(1.0, abs(score - threshold) / max(threshold, 1e-6))
+    return {
+        "decision_type": "quality_gate",
+        "trigger": {"review_score": round(score, 4), "threshold": threshold},
+        "options": [
+            {"value": "pass", "score": round(score, 4), "reason": f"score >= {threshold}"},
+            {"value": "retry", "score": round(1 - score, 4), "reason": f"score < {threshold}"},
+        ],
+        "selection": {
+            "value": "pass" if passed else "retry",
+            "confidence": round(confidence, 4),
+            "reason": "阈值判断",
+        },
+    }
+
+
 async def receive(state: TicketState) -> dict:
     """初始化工单状态，加载用户长期记忆。"""
     global _active_trace_id  # noqa: PLW0603
@@ -191,8 +238,14 @@ async def receive(state: TicketState) -> dict:
             # Load user context if user_id present
             user_context = {}
             if _memory_manager and state.get("user_id"):
-                user_context = await _memory_manager.load_user_context(state["user_id"])
-                await _memory_manager.ensure_user(state["user_id"])
+                async with _span(
+                    "load_user_context",
+                    span_type="memory_call",
+                    input_data={"user_id": state["user_id"]},
+                ) as mem_span:
+                    user_context = await _memory_manager.load_user_context(state["user_id"])
+                    await _memory_manager.ensure_user(state["user_id"])
+                    mem_span.set_output({"context_keys": list(user_context.keys())})
 
             result = {
                 "status": "received",
@@ -222,7 +275,14 @@ async def classify(state: TicketState) -> dict:
                 category = result["category"]
                 priority = result["priority"]
                 reason = result.get("reason", "")
+                confidence = result.get("confidence")
                 span.set_output({"category": category, "priority": priority})
+                span.set_metadata({"decision": _build_classify_decision(
+                    content=content,
+                    category=category,
+                    confidence=confidence,
+                    reason=reason,
+                )})
                 return {
                     "category": category,
                     "priority": priority,
@@ -348,6 +408,10 @@ async def review(state: TicketState) -> dict:
                 result = await _reviewer_agent.review(content, processing_result, category)
                 score = result["score"]
                 span.set_output({"review_score": score})
+                span.set_metadata({"decision": _build_review_decision(
+                    score=score,
+                    threshold=_get_settings().review_threshold,
+                )})
                 return {
                     "review_score": score,
                     "status": "reviewing",
@@ -474,16 +538,13 @@ async def handle_failure(state: TicketState) -> dict:
 def route_decision(state: TicketState) -> Literal["auto_reply", "escalate", "process"]:
     """路由决策：根据分类和优先级选择处理路径。
 
-    - 咨询类 -> auto_reply
     - 投诉类 -> escalate
     - P0 优先级 -> escalate
-    - 其他 -> process
+    - 其他（含咨询）-> process
     """
     category = state.get("category", "")
     priority = state.get("priority", "P3")
 
-    if category == TicketCategory.INQUIRY.value:
-        return "auto_reply"
     if category == TicketCategory.COMPLAINT.value:
         return "escalate"
     if priority == TicketPriority.P0.value:
@@ -521,23 +582,58 @@ def retry_decision(state: TicketState) -> Literal["process", "human_review_wait"
 
 
 async def retry_check(state: TicketState) -> dict:
-    """重试检查节点：递增重试计数。
+    """重试检查节点：递增重试计数，并记录决策点。
 
     若 retry_count 已达上限（即将进入 human_review_wait），
     预置 trigger_type=review_failed 供人工审核节点使用。
     """
+    _restore_trace_context(state)
     with log_context(agent="retry_check"):
         new_retry = state.get("retry_count", 0) + 1
+        max_retries = _get_settings().max_retries
+        will_escalate = new_retry >= max_retries
         result: dict[str, Any] = {
             "retry_count": new_retry,
             "review_score": None,  # 重置评分，等待重新审核
         }
-        if new_retry >= _get_settings().max_retries:
+        if will_escalate:
             result["trigger_type"] = state.get("trigger_type") or "review_failed"
             result["trigger_reason"] = (
                 state.get("trigger_reason")
                 or f"AI 多次审核未通过（retry_count={new_retry}）"
             )
+
+        # 决策点埋点：retry vs escalate 的边界判断
+        async with _span(
+            "retry_check",
+            input_data={"retry_count": new_retry, "max_retries": max_retries},
+        ) as span:
+            span.set_output({"will_escalate": will_escalate})
+            span.set_metadata({"decision": {
+                "decision_type": "boundary",
+                "trigger": {
+                    "retry_count": new_retry,
+                    "max_retries": max_retries,
+                    "review_score": state.get("review_score"),
+                },
+                "options": [
+                    {
+                        "value": "retry",
+                        "score": 0.0 if will_escalate else 1.0,
+                        "reason": f"retry_count={new_retry} < max={max_retries}",
+                    },
+                    {
+                        "value": "escalate",
+                        "score": 1.0 if will_escalate else 0.0,
+                        "reason": f"retry_count={new_retry} >= max={max_retries}",
+                    },
+                ],
+                "selection": {
+                    "value": "escalate" if will_escalate else "retry",
+                    "confidence": 1.0,
+                    "reason": "硬阈值",
+                },
+            }})
         return result
 
 

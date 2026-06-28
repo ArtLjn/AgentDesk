@@ -10,6 +10,7 @@ from loguru import logger
 from openai import AsyncOpenAI
 
 from src.multi_agent_system.config import Settings
+from src.multi_agent_system.core.metrics import metrics_collector
 from src.multi_agent_system.core.trace import current_trace_id
 
 __all__ = ["CachedLLMClient"]
@@ -72,13 +73,17 @@ class CachedLLMClient:
             use_model = self.model
         llm_cache = _get_llm_cache()
 
-        from src.multi_agent_system.core.metrics import metrics_collector
-
         # 缓存未启用或显式禁用缓存，直接调用
         if llm_cache is None or not cache:
             logger.debug(f"[CachedLLMClient] 跳过缓存，直接调用 {use_model}")
             metrics_collector.record_cache_query(hit=False)
-            trace_span = self._get_llm_span(use_model, task_type)
+            trace_span = self._get_llm_span(
+                use_model,
+                task_type,
+                messages=messages,
+                temperature=temperature,
+                kwargs=kwargs,
+            )
             async with trace_span:
                 start = time.time()
                 try:
@@ -88,14 +93,7 @@ class CachedLLMClient:
                         temperature=temperature,
                         **kwargs,
                     )
-                    duration = time.time() - start
-                    metrics_collector.record_llm_call(
-                        model=use_model,
-                        task_type=task_type or "unknown",
-                        duration_seconds=duration,
-                    )
-                    tokens = getattr(result.usage, "total_tokens", 0) if hasattr(result, "usage") and result.usage else 0
-                    trace_span.set_metadata({"model": use_model, "tokens": tokens, "duration": round(duration, 4)})
+                    await self._finalize_llm_span(trace_span, result, use_model, start, task_type)
                     return result
                 except Exception as e:
                     duration = time.time() - start
@@ -126,7 +124,13 @@ class CachedLLMClient:
         # 缓存未命中，调用 API
         logger.debug(f"[CachedLLMClient] 缓存未命中，调用 {use_model}")
         metrics_collector.record_cache_query(hit=False)
-        trace_span = self._get_llm_span(use_model, task_type)
+        trace_span = self._get_llm_span(
+            use_model,
+            task_type,
+            messages=messages,
+            temperature=temperature,
+            kwargs=kwargs,
+        )
         async with trace_span:
             start = time.time()
             try:
@@ -136,14 +140,7 @@ class CachedLLMClient:
                     temperature=temperature,
                     **kwargs,
                 )
-                duration = time.time() - start
-                metrics_collector.record_llm_call(
-                    model=use_model,
-                    task_type=task_type or "unknown",
-                    duration_seconds=duration,
-                )
-                tokens = getattr(result.usage, "total_tokens", 0) if hasattr(result, "usage") and result.usage else 0
-                trace_span.set_metadata({"model": use_model, "tokens": tokens, "duration": round(duration, 4)})
+                await self._finalize_llm_span(trace_span, result, use_model, start, task_type)
                 # 缓存结果
                 llm_cache.set(cache_key, result)
                 return result
@@ -159,7 +156,57 @@ class CachedLLMClient:
                 raise
 
     @staticmethod
-    def _get_llm_span(model: str, task_type: str | None):
+    async def _finalize_llm_span(
+        trace_span: Any,
+        result: Any,
+        model: str,
+        start: float,
+        task_type: str | None,
+    ) -> None:
+        """LLM 调用完成后统一写入 token_usage metadata + 累加 trace.total_tokens。"""
+        duration = time.time() - start
+        metrics_collector.record_llm_call(
+            model=model,
+            task_type=task_type or "unknown",
+            duration_seconds=duration,
+        )
+        usage = getattr(result, "usage", None)
+        prompt_tokens = _numeric_usage(getattr(usage, "prompt_tokens", 0))
+        completion_tokens = _numeric_usage(getattr(usage, "completion_tokens", 0))
+        total_tokens = _numeric_usage(getattr(usage, "total_tokens", 0))
+        choice = result.choices[0] if getattr(result, "choices", None) else None
+        message = getattr(choice, "message", None)
+        content = getattr(message, "content", "") if message is not None else ""
+        finish_reason = getattr(choice, "finish_reason", None) if choice is not None else None
+        trace_span.set_output({
+            "content": content if isinstance(content, str) else "",
+            "finish_reason": finish_reason if isinstance(finish_reason, str) else None,
+        })
+        trace_span.set_metadata({
+            "model": model,
+            "token_usage": {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": total_tokens,
+            },
+            "duration": round(duration, 4),
+        })
+        # 回写到 trace.total_tokens（修复 P0：原本永为 0）
+        if total_tokens > 0:
+            trace_id = current_trace_id.get()
+            if trace_id:
+                from src.multi_agent_system.workflow.graph import _trace_manager
+                if _trace_manager is not None:
+                    await _trace_manager.add_token_usage(trace_id, total_tokens)
+
+    @staticmethod
+    def _get_llm_span(
+        model: str,
+        task_type: str | None,
+        messages: list[dict[str, Any]] | None = None,
+        temperature: float | None = None,
+        kwargs: dict[str, Any] | None = None,
+    ):
         """获取 LLM 调用 span。"""
         if current_trace_id.get() is None:
             return _NoOpLLMSpan()
@@ -169,7 +216,14 @@ class CachedLLMClient:
         return _trace_manager.start_span(
             "chat_completions",
             "llm_call",
-            input_data={"model": model, "task_type": task_type},
+            input_data={
+                "model": model,
+                "task_type": task_type,
+                "temperature": temperature,
+                "message_count": len(messages or []),
+                "messages_preview": _preview_messages(messages or []),
+                "params": _safe_kwargs(kwargs or {}),
+            },
         )
 
 
@@ -193,3 +247,36 @@ class _NoOpLLMSpan:
 
     async def __aexit__(self, *args: Any) -> bool:
         return False
+
+
+def _preview_messages(messages: list[dict[str, Any]]) -> list[dict[str, str]]:
+    """生成可展示的消息摘要，避免 trace 中写入过长上下文。"""
+    preview: list[dict[str, str]] = []
+    for message in messages[-6:]:
+        role = str(message.get("role", "unknown"))
+        content = str(message.get("content", ""))
+        preview.append({
+            "role": role,
+            "content": _truncate_text(content, 1200),
+        })
+    return preview
+
+
+def _safe_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """只保留适合出现在调试面板里的非敏感调用参数。"""
+    allowed = {"max_tokens", "top_p", "presence_penalty", "frequency_penalty", "seed"}
+    return {key: value for key, value in kwargs.items() if key in allowed}
+
+
+def _numeric_usage(value: Any) -> int:
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int | float):
+        return int(value)
+    return 0
+
+
+def _truncate_text(text: str, max_length: int) -> str:
+    if len(text) <= max_length:
+        return text
+    return f"{text[:max_length]}... (+{len(text) - max_length} 字)"

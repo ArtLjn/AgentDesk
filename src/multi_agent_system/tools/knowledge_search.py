@@ -194,7 +194,11 @@ class KnowledgeSearchTool:
             匹配结果列表，每项包含 content、score、metadata
         """
         self.ensure_collection()
-        query_vector = self._get_embedding(query)
+        try:
+            query_vector = self._get_embedding(query)
+        except Exception as e:
+            logger.warning(f"向量检索前生成 embedding 失败，改用关键词兜底检索: {e}")
+            return self._keyword_search_fallback(query, top_k=top_k)
 
         if hasattr(self._client, "query_points"):
             response = self._client.query_points(
@@ -228,6 +232,53 @@ class KnowledgeSearchTool:
 
         logger.info(f"查询匹配到 {len(matched)} 条结果")
         return matched
+
+    def _keyword_search_fallback(self, query: str, top_k: int = 3) -> list[dict]:
+        """embedding 不可用时从 Qdrant payload 做轻量关键词兜底检索。"""
+        records, _ = self._client.scroll(
+            collection_name=self._collection_name,
+            limit=max(100, top_k * 20),
+            with_payload=True,
+            with_vectors=False,
+        )
+        query_terms = self._extract_query_terms(query)
+        matched: list[dict[str, Any]] = []
+        for record in records:
+            payload = record.payload or {}
+            text = f"{payload.get('title', '')} {payload.get('category', '')} {payload.get('content', '')}"
+            score = self._keyword_score(query_terms, text)
+            if score <= 0:
+                continue
+            matched.append({
+                "content": payload.get("content", ""),
+                "score": score,
+                "metadata": {
+                    k: v for k, v in payload.items() if k not in ("content",)
+                },
+            })
+
+        matched.sort(key=lambda item: item["score"], reverse=True)
+        logger.info(f"关键词兜底检索匹配到 {len(matched[:top_k])} 条结果")
+        return matched[:top_k]
+
+    def _extract_query_terms(self, query: str) -> list[str]:
+        """基于字符 n-gram 提取通用中文短查询检索特征。"""
+        normalized = "".join(ch for ch in query if not ch.isspace())
+        terms: list[str] = [normalized] if len(normalized) >= 2 else []
+        for size in (4, 3, 2):
+            for start in range(0, max(0, len(normalized) - size + 1)):
+                terms.append(normalized[start:start + size])
+        return list(dict.fromkeys(terms))
+
+    def _keyword_score(self, terms: list[str], text: str) -> float:
+        """根据 n-gram 命中强度计算 0~1 的兜底相关度。"""
+        if not terms:
+            return 0.0
+        weighted_hits = sum(len(term) for term in terms if term and term in text)
+        total_weight = sum(len(term) for term in terms)
+        if weighted_hits == 0 or total_weight == 0:
+            return 0.0
+        return min(1.0, weighted_hits / total_weight)
 
     def list_documents(
         self,

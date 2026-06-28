@@ -43,9 +43,14 @@ _REACT_SYSTEM_PROMPT = """\
 要求：
 - 每个 Thought 必须基于已有信息
 - 工具参数必须严格符合 Schema
+- 如果附加上下文包含“知识库预检索结果”且检索到知识片段，最终答案必须优先依据这些知识片段
 - 如果已有足够信息，直接给出 Final Answer
 - 回答使用中文，简洁专业
 """
+
+_QUERY_NORMALIZATION_RULES: tuple[tuple[str, str], ...] = (
+    ("优惠卷", "优惠券"),
+)
 
 
 class ReActProcessorAgent:
@@ -129,8 +134,8 @@ class ReActProcessorAgent:
         max_retries=3,
         backoff_base=2.0,
         retryable_exceptions=(APIError, APIConnectionError, RateLimitError, RetryableError),
-        fallback=lambda self, content, category, priority, context="", user_id=None, memory=None: fallback_registry.execute(
-            "processor.generate_solution", content, category, priority
+        fallback=lambda self, content, category, priority, context="", user_id=None, memory=None: self._fallback_with_knowledge(
+            content, category, priority
         ),
     )
     async def _process_by_react(
@@ -215,12 +220,18 @@ class ReActProcessorAgent:
                 # Check for Final Answer
                 if "Final Answer:" in raw:
                     answer = raw.split("Final Answer:")[-1].strip()
+                    thought = self._extract_thought(raw)
 
                     # Record in memory
                     if memory:
                         memory.add_thought(f"Completed in {iteration + 1} iterations", iteration)
 
-                    iter_span.set_output({"final_answer": True, "iterations": iteration + 1})
+                    iter_span.set_output({
+                        "thought": thought,
+                        "raw_response": raw,
+                        "final_answer": answer,
+                        "iterations": iteration + 1,
+                    })
                     return {
                         "result": answer,
                         "references": references,
@@ -230,8 +241,21 @@ class ReActProcessorAgent:
                 if raw.strip().startswith("{"):
                     try:
                         parsed = parse_json_response(raw)
+                        final_answer = self._extract_json_final_answer(parsed)
+                        if final_answer:
+                            iter_span.set_output({
+                                "raw_response": raw,
+                                "json_final_answer": final_answer,
+                            })
+                            return {
+                                "result": final_answer,
+                                "references": references,
+                            }
                         if "result" in parsed:
-                            iter_span.set_output({"json_result": True})
+                            iter_span.set_output({
+                                "raw_response": raw,
+                                "json_result": parsed.get("result", ""),
+                            })
                             merged_references = self._merge_references(
                                 references,
                                 parsed.get("references", []),
@@ -253,6 +277,7 @@ class ReActProcessorAgent:
                 if action:
                     tool_name = action.get("tool", "")
                     params = action.get("params", {})
+                    observation = ""
 
                     if memory:
                         memory.add_action(tool_name, params, iteration)
@@ -261,7 +286,10 @@ class ReActProcessorAgent:
                     tool_span = self._get_tool_span(tool_name, params)
                     async with tool_span:
                         observation = await self._execute_tool(tool_name, params)
-                        tool_span.set_output({"observation_length": len(str(observation))})
+                        tool_span.set_output({
+                            "observation": str(observation),
+                            "observation_length": len(str(observation)),
+                        })
                     if tool_name == "search_knowledge" and observation:
                         references.append(str(observation))
 
@@ -274,12 +302,23 @@ class ReActProcessorAgent:
                         "role": "user",
                         "content": f"Observation: {observation}",
                     })
+                    iter_span.set_output({
+                        "thought": thought,
+                        "action": action,
+                        "observation": str(observation),
+                        "raw_response": raw,
+                    })
                 else:
                     # No action found, just add response and continue
                     messages.append({"role": "assistant", "content": raw})
                     messages.append({
                         "role": "user",
                         "content": "Observation: 未识别到工具调用，请继续思考或直接给出 Final Answer。",
+                    })
+                    iter_span.set_output({
+                        "thought": thought,
+                        "raw_response": raw,
+                        "observation": "未识别到工具调用，请继续思考或直接给出 Final Answer。",
                     })
 
                 iter_span.set_metadata({"thought": thought, "has_action": action is not None})
@@ -292,15 +331,48 @@ class ReActProcessorAgent:
         }
 
     async def _prefetch_knowledge(self, content: str, category: str) -> str:
-        """技术和账务类工单先做一次知识库检索，保证 RAG 稳定进入上下文。"""
-        if category not in {"technical", "billing"}:
-            return ""
+        """处理类工单先做一次知识库检索，保证 RAG 稳定进入上下文。"""
         if not self._tool_registry or "search_knowledge" not in self._tool_registry:
             return ""
+        query = self._normalize_knowledge_query(content)
+        settings = Settings()
         return await self._execute_tool(
             "search_knowledge",
-            {"query": content, "top_k": 3, "score_threshold": 0.5},
+            {
+                "query": query,
+                "top_k": settings.qdrant_top_k,
+                "score_threshold": settings.qdrant_score_threshold,
+            },
         )
+
+    async def _fallback_with_knowledge(
+        self,
+        content: str,
+        category: str,
+        priority: str,
+    ) -> dict:
+        """处理模型不可用时，优先用知识库检索结果生成基础答复。"""
+        knowledge_context = await self._prefetch_knowledge(content, category)
+        if knowledge_context and "未检索到相关知识片段" not in knowledge_context:
+            return {
+                "result": (
+                    "您好，已根据知识库中与该问题相关的规则整理如下：\n\n"
+                    f"{knowledge_context}\n\n"
+                    "建议您优先按上述知识片段核对适用条件、操作步骤和限制说明；"
+                    "如仍无法解决，请补充具体对象、操作路径和异常截图，方便客服继续核查。"
+                ),
+                "references": [knowledge_context],
+            }
+        return await fallback_registry.execute(
+            "processor.generate_solution", content, category, priority
+        )
+
+    def _normalize_knowledge_query(self, content: str) -> str:
+        """规范化检索 query，修正常见业务词错别字。"""
+        normalized = content
+        for source, target in _QUERY_NORMALIZATION_RULES:
+            normalized = normalized.replace(source, target)
+        return normalized
 
     def _merge_references(self, *groups: object) -> list[str]:
         """合并工具和模型返回的引用，保留顺序并去重。"""
@@ -315,6 +387,14 @@ class ReActProcessorAgent:
                     merged.append(value)
                     seen.add(value)
         return merged
+
+    def _extract_json_final_answer(self, parsed: dict[str, Any]) -> str:
+        """兼容模型把 ReAct 结果包进 JSON 字段的情况。"""
+        for key in ("Final Answer", "final_answer", "finalAnswer"):
+            value = parsed.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return ""
 
     def _extract_thought(self, text: str) -> str:
         """从响应中提取 Thought。"""
