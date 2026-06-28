@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { useKnowledge, useUploadKnowledge } from '@/hooks/useApi'
 import { ApiError } from '@/lib/api'
+import { filterKnowledgeDocuments } from '@/lib/knowledgeReference'
 import type { KnowledgeDocument } from '@/types'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -33,38 +34,23 @@ const sampleDocs = [
 
 export function Knowledge() {
   const [searchParams, setSearchParams] = useSearchParams()
-  const initialQuery = searchParams.get('q') || ''
   const [title, setTitle] = useState('')
   const [content, setContent] = useState('')
   const [category, setCategory] = useState('technical')
-  const [query, setQuery] = useState(initialQuery)
   const [selectedId, setSelectedId] = useState('')
-  const [activeCategory, setActiveCategory] = useState<string>('')
   const [success, setSuccess] = useState(false)
   const [error, setError] = useState('')
-
-  // 同步 URL ?q= 到 query state（支持从工单详情跳转过来时自动搜索）
-  useMemo(() => {
-    const urlQuery = searchParams.get('q') || ''
-    if (urlQuery && urlQuery !== query) {
-      setQuery(urlQuery)
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [searchParams])
+  const query = searchParams.get('q') || ''
+  const activeCategory = searchParams.get('category') || ''
 
   const { data, isLoading, refetch } = useKnowledge({ limit: '200' })
   const uploadMutation = useUploadKnowledge()
-  const documents = data?.documents || []
+  const documents = useMemo(() => data?.documents || [], [data?.documents])
 
   const filteredDocs = useMemo(() => {
-    const keyword = query.trim().toLowerCase()
-    return documents.filter((doc) => {
-      const matchesCategory = !activeCategory || doc.category === activeCategory
-      if (!matchesCategory) return false
-      if (!keyword) return true
-      return [doc.title, doc.category, doc.preview, doc.content]
-        .filter(Boolean)
-        .some((value) => value.toLowerCase().includes(keyword))
+    return filterKnowledgeDocuments(documents, {
+      query,
+      category: activeCategory,
     })
   }, [documents, query, activeCategory])
 
@@ -218,7 +204,6 @@ export function Knowledge() {
                   value={query}
                   onChange={(e) => {
                     const value = e.target.value
-                    setQuery(value)
                     setSelectedId('')
                     // 同步 URL（清空时移除 ?q=）
                     const next = new URLSearchParams(searchParams)
@@ -236,8 +221,11 @@ export function Knowledge() {
                 categoryCount={categoryCount}
                 activeCategory={activeCategory}
                 onToggle={(c) => {
-                  setActiveCategory(c)
                   setSelectedId('')
+                  const next = new URLSearchParams(searchParams)
+                  if (c) next.set('category', c)
+                  else next.delete('category')
+                  setSearchParams(next, { replace: true })
                 }}
               />
               <ScrollArea className="h-[610px] pr-3">
