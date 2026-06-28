@@ -39,6 +39,7 @@ export function Knowledge() {
   const [category, setCategory] = useState('technical')
   const [query, setQuery] = useState(initialQuery)
   const [selectedId, setSelectedId] = useState('')
+  const [activeCategory, setActiveCategory] = useState<string>('')
   const [success, setSuccess] = useState(false)
   const [error, setError] = useState('')
 
@@ -57,13 +58,15 @@ export function Knowledge() {
 
   const filteredDocs = useMemo(() => {
     const keyword = query.trim().toLowerCase()
-    if (!keyword) return documents
     return documents.filter((doc) => {
+      const matchesCategory = !activeCategory || doc.category === activeCategory
+      if (!matchesCategory) return false
+      if (!keyword) return true
       return [doc.title, doc.category, doc.preview, doc.content]
         .filter(Boolean)
         .some((value) => value.toLowerCase().includes(keyword))
     })
-  }, [documents, query])
+  }, [documents, query, activeCategory])
 
   const selectedDoc = filteredDocs.find((doc) => doc.id === selectedId)
     || filteredDocs[0]
@@ -229,18 +232,19 @@ export function Knowledge() {
               </div>
             </CardHeader>
             <CardContent>
-              <div className="mb-3 flex flex-wrap gap-2">
-                {Object.entries(categoryCount).map(([name, count]) => (
-                  <Badge key={name} variant="outline" className="border-border bg-background text-[11px]">
-                    {name} · {count}
-                  </Badge>
-                ))}
-              </div>
+              <CategoryChips
+                categoryCount={categoryCount}
+                activeCategory={activeCategory}
+                onToggle={(c) => {
+                  setActiveCategory(c)
+                  setSelectedId('')
+                }}
+              />
               <ScrollArea className="h-[610px] pr-3">
                 {isLoading ? (
                   <div className="space-y-2">
-                    {Array.from({ length: 7 }).map((_, index) => (
-                      <Skeleton key={index} className="h-20 rounded-md" />
+                    {Array.from({ length: 8 }).map((_, index) => (
+                      <Skeleton key={index} className="h-14 rounded-md" />
                     ))}
                   </div>
                 ) : filteredDocs.length === 0 ? (
@@ -298,29 +302,87 @@ function KnowledgeListItem({
     <button
       type="button"
       onClick={onClick}
-      className={`w-full rounded-md border p-3 text-left transition-colors ${
+      className={`w-full rounded-md border p-2.5 text-left transition-colors ${
         active ? 'border-primary bg-primary/5' : 'border-border bg-background hover:border-primary/50'
       }`}
     >
-      <div className="mb-1.5 flex items-start justify-between gap-2">
-        <div className="min-w-0">
-          <div className="truncate text-sm font-medium">{doc.title}</div>
-          <div className="mt-1 flex items-center gap-2 text-[11px] text-muted-foreground">
-            <span className="flex items-center gap-1">
-              <Layers className="h-3 w-3" />
-              {doc.chunk_count} 块
-            </span>
-            <span className="font-mono">{doc.id.slice(0, 8)}</span>
-          </div>
+      <div className="flex items-center gap-2">
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-sm font-medium leading-snug">{doc.title}</div>
         </div>
-        <Badge variant="outline" className="shrink-0 border-0 bg-primary/15 text-[10px] text-primary">
+        <Badge variant="outline" className="shrink-0 border-0 bg-primary/15 px-1.5 py-0 text-[10px] text-primary">
           {doc.category}
         </Badge>
       </div>
-      <p className="line-clamp-2 text-xs leading-relaxed text-muted-foreground">
+      <p className="mt-1 line-clamp-1 text-[11px] leading-snug text-muted-foreground/80">
         {doc.preview || doc.content || '暂无内容'}
       </p>
+      <div className="mt-1 flex items-center gap-2 text-[10px] text-muted-foreground/70">
+        <span className="flex items-center gap-0.5">
+          <Layers className="h-2.5 w-2.5" />
+          {doc.chunk_count} 块
+        </span>
+        <span className="font-mono">{doc.id.slice(0, 8)}</span>
+      </div>
     </button>
+  )
+}
+
+function CategoryChips({
+  categoryCount,
+  activeCategory,
+  onToggle,
+}: {
+  categoryCount: Record<string, number>
+  activeCategory: string
+  onToggle: (category: string) => void
+}) {
+  const [expanded, setExpanded] = useState(false)
+  const entries = Object.entries(categoryCount).sort((a, b) => b[1] - a[1])
+  const LIMIT = 6
+  const visible = expanded ? entries : entries.slice(0, LIMIT)
+  const hidden = entries.length - LIMIT
+
+  return (
+    <div className="mb-3">
+      <div className="flex flex-wrap items-center gap-1">
+        <button
+          type="button"
+          onClick={() => onToggle('')}
+          className={`rounded-full px-2 py-0.5 text-[10px] transition-colors ${
+            !activeCategory
+              ? 'bg-primary text-primary-foreground'
+              : 'bg-secondary text-muted-foreground hover:bg-secondary/70'
+          }`}
+        >
+          全部 · {Object.values(categoryCount).reduce((a, b) => a + b, 0)}
+        </button>
+        {visible.map(([name, count]) => (
+          <button
+            key={name}
+            type="button"
+            onClick={() => onToggle(name === activeCategory ? '' : name)}
+            className={`max-w-[160px] truncate rounded-full px-2 py-0.5 text-[10px] transition-colors ${
+              name === activeCategory
+                ? 'bg-primary text-primary-foreground'
+                : 'bg-secondary text-muted-foreground hover:bg-secondary/70'
+            }`}
+            title={name}
+          >
+            {name} · {count}
+          </button>
+        ))}
+        {hidden > 0 && (
+          <button
+            type="button"
+            onClick={() => setExpanded((v) => !v)}
+            className="rounded-full bg-secondary px-2 py-0.5 text-[10px] text-muted-foreground transition-colors hover:bg-secondary/70"
+          >
+            {expanded ? '收起' : `+${hidden}`}
+          </button>
+        )}
+      </div>
+    </div>
   )
 }
 

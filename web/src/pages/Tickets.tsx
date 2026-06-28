@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useTickets, useCreateTicket } from '@/hooks/useApi'
 import { Card, CardContent } from '@/components/ui/card'
@@ -13,7 +13,12 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger,
 } from '@/components/ui/dialog'
 import { StatusBadge, CategoryBadge, PriorityBadge } from '@/components/layout/StatusBadge'
-import { Plus, Search, RefreshCw } from 'lucide-react'
+import {
+  Plus, Search, RefreshCw,
+  ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight,
+} from 'lucide-react'
+
+const PAGE_SIZE_OPTIONS = [10, 20, 50]
 
 const sampleContents = [
   '系统突然崩溃，无法启动，报错代码 ERR-5001',
@@ -31,6 +36,8 @@ export function Tickets() {
   const [status, setStatus] = useState<string>('')
   const [category, setCategory] = useState<string>('')
   const [search, setSearch] = useState('')
+  const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState(10)
   const [dialogOpen, setDialogOpen] = useState(false)
   const [newContent, setNewContent] = useState('')
   const [newUserId, setNewUserId] = useState('U001')
@@ -42,12 +49,31 @@ export function Tickets() {
   const { data: tickets = [], isLoading, refetch } = useTickets(params)
   const createMutation = useCreateTicket()
 
-  const filtered = search
-    ? tickets.filter((t: any) =>
-        t.content?.toLowerCase().includes(search.toLowerCase()) ||
-        t.ticket_id?.toLowerCase().includes(search.toLowerCase())
-      )
-    : tickets
+  const filtered = useMemo(() => {
+    if (!search) return tickets
+    const s = search.toLowerCase()
+    return tickets.filter((t: any) =>
+      t.content?.toLowerCase().includes(s) ||
+      t.ticket_id?.toLowerCase().includes(s),
+    )
+  }, [tickets, search])
+
+  // 过滤/搜索/页大小变化时，自动回到第一页
+  useEffect(() => { setPage(1) }, [status, category, search, pageSize])
+
+  const total = filtered.length
+  const totalPages = Math.max(1, Math.ceil(total / pageSize))
+  const currentPage = Math.min(page, totalPages)
+  const startIdx = (currentPage - 1) * pageSize
+  const endIdx = Math.min(startIdx + pageSize, total)
+  const pageItems = filtered.slice(startIdx, endIdx)
+
+  const pageNumbers = useMemo(() => {
+    const max = 5
+    if (totalPages <= max) return Array.from({ length: totalPages }, (_, i) => i + 1)
+    const start = Math.max(1, Math.min(currentPage - 2, totalPages - max + 1))
+    return Array.from({ length: max }, (_, i) => start + i)
+  }, [currentPage, totalPages])
 
   const handleCreate = async () => {
     if (!newContent.trim()) return
@@ -155,52 +181,52 @@ export function Tickets() {
       </Card>
 
       {/* 工单表格 */}
-      <Card className="bg-card border-border">
+      <Card className="bg-card border-border overflow-hidden">
         <Table>
           <TableHeader>
             <TableRow className="border-border hover:bg-transparent">
-              <TableHead className="text-muted-foreground text-[11px] h-8 px-3">工单 ID</TableHead>
-              <TableHead className="text-muted-foreground text-[11px] h-8 px-3">内容</TableHead>
-              <TableHead className="text-muted-foreground text-[11px] h-8 px-3">分类</TableHead>
-              <TableHead className="text-muted-foreground text-[11px] h-8 px-3">优先级</TableHead>
-              <TableHead className="text-muted-foreground text-[11px] h-8 px-3">状态</TableHead>
-              <TableHead className="text-muted-foreground text-[11px] h-8 px-3">评分</TableHead>
-              <TableHead className="text-muted-foreground text-[11px] h-8 px-3">创建时间</TableHead>
+              <TableHead className="text-muted-foreground text-xs font-medium h-11 px-4 w-[160px]">工单 ID</TableHead>
+              <TableHead className="text-muted-foreground text-xs font-medium h-11 px-4">内容</TableHead>
+              <TableHead className="text-muted-foreground text-xs font-medium h-11 px-4 w-[110px]">分类</TableHead>
+              <TableHead className="text-muted-foreground text-xs font-medium h-11 px-4 w-[90px]">优先级</TableHead>
+              <TableHead className="text-muted-foreground text-xs font-medium h-11 px-4 w-[120px]">状态</TableHead>
+              <TableHead className="text-muted-foreground text-xs font-medium h-11 px-4 text-right w-[80px]">评分</TableHead>
+              <TableHead className="text-muted-foreground text-xs font-medium h-11 px-4 text-right w-[150px]">创建时间</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {isLoading ? (
-              Array.from({ length: 5 }).map((_, i) => (
+              Array.from({ length: pageSize }).map((_, i) => (
                 <TableRow key={i} className="border-border">
                   {Array.from({ length: 7 }).map((_, j) => (
-                    <TableCell key={j} className="py-1.5 px-3">
-                      <div className="h-3 w-20 bg-muted rounded animate-pulse" />
+                    <TableCell key={j} className="py-3 px-4">
+                      <div className="h-4 w-24 bg-muted rounded animate-pulse" />
                     </TableCell>
                   ))}
                 </TableRow>
               ))
-            ) : filtered.length === 0 ? (
+            ) : pageItems.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={7} className="text-center text-muted-foreground py-10 text-sm">
+                <TableCell colSpan={7} className="text-center text-muted-foreground py-16 text-sm">
                   暂无工单数据
                 </TableCell>
               </TableRow>
             ) : (
-              filtered.map((ticket: any) => (
+              pageItems.map((ticket: any) => (
                 <TableRow
                   key={ticket.ticket_id}
                   className="border-border cursor-pointer hover:bg-muted/40 transition-colors"
                   onClick={() => navigate(`/tickets/${ticket.ticket_id}`)}
                 >
-                  <TableCell className="font-mono text-[11px] text-primary py-1.5 px-3">{ticket.ticket_id?.slice(0, 16)}</TableCell>
-                  <TableCell className="max-w-[280px] truncate text-[12px] py-1.5 px-3">{ticket.content}</TableCell>
-                  <TableCell className="py-1.5 px-3">{ticket.category ? <CategoryBadge category={ticket.category} /> : '-'}</TableCell>
-                  <TableCell className="py-1.5 px-3">{ticket.priority ? <PriorityBadge priority={ticket.priority} /> : '-'}</TableCell>
-                  <TableCell className="py-1.5 px-3"><StatusBadge status={ticket.status} /></TableCell>
-                  <TableCell className="font-mono text-[11px] py-1.5 px-3 tabular-nums">
+                  <TableCell className="font-mono text-[12px] text-primary py-3 px-4">{ticket.ticket_id?.slice(0, 16)}</TableCell>
+                  <TableCell className="max-w-[420px] truncate text-[13px] py-3 px-4">{ticket.content}</TableCell>
+                  <TableCell className="py-3 px-4">{ticket.category ? <CategoryBadge category={ticket.category} /> : '-'}</TableCell>
+                  <TableCell className="py-3 px-4">{ticket.priority ? <PriorityBadge priority={ticket.priority} /> : '-'}</TableCell>
+                  <TableCell className="py-3 px-4"><StatusBadge status={ticket.status} /></TableCell>
+                  <TableCell className="font-mono text-[12px] py-3 px-4 text-right tabular-nums">
                     {ticket.review_score != null ? ticket.review_score.toFixed(2) : '-'}
                   </TableCell>
-                  <TableCell className="text-[11px] text-muted-foreground py-1.5 px-3 tabular-nums">
+                  <TableCell className="text-[12px] text-muted-foreground py-3 px-4 text-right tabular-nums">
                     {ticket.created_at ? new Date(ticket.created_at).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '-'}
                   </TableCell>
                 </TableRow>
@@ -208,6 +234,80 @@ export function Tickets() {
             )}
           </TableBody>
         </Table>
+
+        {/* 分页栏 */}
+        <div className="flex items-center justify-between gap-4 px-4 py-3 border-t border-border bg-muted/20">
+          <div className="text-xs text-muted-foreground tabular-nums">
+            {total === 0 ? '共 0 条' : `第 ${startIdx + 1}-${endIdx} 条，共 ${total} 条`}
+          </div>
+          <div className="flex items-center gap-1">
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8"
+              onClick={() => setPage(1)}
+              disabled={currentPage <= 1}
+              title="第一页"
+            >
+              <ChevronsLeft className="h-4 w-4" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8"
+              onClick={() => setPage(p => Math.max(1, p - 1))}
+              disabled={currentPage <= 1}
+              title="上一页"
+            >
+              <ChevronLeft className="h-4 w-4" />
+            </Button>
+            {pageNumbers.map(p => (
+              <Button
+                key={p}
+                variant={p === currentPage ? 'default' : 'ghost'}
+                size="icon"
+                className="h-8 w-8 text-xs tabular-nums"
+                onClick={() => setPage(p)}
+              >
+                {p}
+              </Button>
+            ))}
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8"
+              onClick={() => setPage(p => Math.min(totalPages, p + 1))}
+              disabled={currentPage >= totalPages}
+              title="下一页"
+            >
+              <ChevronRight className="h-4 w-4" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8"
+              onClick={() => setPage(totalPages)}
+              disabled={currentPage >= totalPages}
+              title="最后一页"
+            >
+              <ChevronsRight className="h-4 w-4" />
+            </Button>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-muted-foreground">每页</span>
+            <Select value={String(pageSize)} onValueChange={(v) => setPageSize(Number(v))}>
+              <SelectTrigger className="w-[70px] h-8 text-xs">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent className="bg-popover border-border">
+                {PAGE_SIZE_OPTIONS.map(n => (
+                  <SelectItem key={n} value={String(n)}>{n}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <span className="text-xs text-muted-foreground">条</span>
+          </div>
+        </div>
       </Card>
     </div>
   )
