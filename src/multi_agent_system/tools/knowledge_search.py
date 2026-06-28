@@ -42,7 +42,12 @@ class KnowledgeSearchTool:
         qdrant_api_key: str = "",
         embedding_api_key: str = "",
     ) -> None:
-        client_kwargs: dict[str, Any] = {"url": qdrant_url, "check_compatibility": False}
+        client_kwargs: dict[str, Any] = {
+            "url": qdrant_url,
+            "check_compatibility": False,
+            # 不读系统代理：Qdrant 通常部署在同机房/公网直连，HTTP 代理反而会干扰 TLS 握手
+            "trust_env": False,
+        }
         if qdrant_api_key:
             client_kwargs["api_key"] = qdrant_api_key
         self._client = QdrantClient(**client_kwargs)

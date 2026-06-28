@@ -1,14 +1,21 @@
 """初始化知识库：预置覆盖 technical/billing/complaint/inquiry 四个分类的知识文档。
 
+数据来源：
+1. 内置 KNOWLEDGE_DOCUMENTS（默认 16 篇）
+2. data/knowledge_base/*.md 文件（自动加载，可在文件中持续维护）
+
 用法：
     cd ai-agent-learning
-    python scripts/seed_knowledge.py
+    python scripts/seed_knowledge.py                  # 上传 内置 + markdown
+    python scripts/seed_knowledge.py --markdown-only  # 仅 markdown
+    python scripts/seed_knowledge.py --inline-only    # 仅内置
 
-前提：Qdrant 和 Ollama 服务已启动。
-如果 Qdrant 在本地而非 Docker，可通过环境变量覆盖：
-    QDRANT_URL=http://localhost:6333 python scripts/seed_knowledge.py
+前提：Qdrant 和 Embedding 服务已启动；config.yaml 已配置好凭据。
 """
 
+import argparse
+import hashlib
+import re
 import sys
 from pathlib import Path
 
@@ -17,6 +24,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.multi_agent_system.config import Settings  # noqa: E402
 from src.multi_agent_system.tools.knowledge_search import KnowledgeSearchTool  # noqa: E402
+
+KB_DIR = Path(__file__).resolve().parent.parent / "data" / "knowledge_base"
 
 # ── 预置知识文档 ──────────────────────────────────────────────
 
@@ -427,28 +436,81 @@ KNOWLEDGE_DOCUMENTS: list[dict] = [
 ]
 
 
+def load_markdown_documents(directory: Path = KB_DIR) -> list[dict]:
+    """从 data/knowledge_base/ 加载所有 markdown 文件作为知识库文档。
+
+    每个文件生成一份文档，字段映射：
+      - id:       "md-" + 文件名 md5 前 8 位（保证内容不变时 id 稳定）
+      - title:    markdown 第一个一级标题（# xxx），找不到时用文件名 stem
+      - category: 文件名 stem（如 technical-faq、billing-guide）
+      - source:   相对路径（如 data/knowledge_base/technical-faq.md）
+      - content:  文件全文
+    """
+    if not directory.exists():
+        print(f"[warn] markdown 目录不存在: {directory}")
+        return []
+
+    docs: list[dict] = []
+    for md_file in sorted(directory.glob("*.md")):
+        text = md_file.read_text(encoding="utf-8")
+        title_match = re.search(r"^#\s+(.+)$", text, re.MULTILINE)
+        title = title_match.group(1).strip() if title_match else md_file.stem
+        doc_id = "md-" + hashlib.md5(md_file.stem.encode("utf-8")).hexdigest()[:8]
+        docs.append(
+            {
+                "id": doc_id,
+                "title": title,
+                "category": md_file.stem,
+                "source": f"data/knowledge_base/{md_file.name}",
+                "content": text,
+            }
+        )
+    return docs
+
+
 def main() -> None:
     """执行知识库初始化。"""
-    settings = Settings()
-    tool = KnowledgeSearchTool(
-        qdrant_url=settings.qdrant_url,
-        collection_name=settings.qdrant_collection,
-        embedding_base_url=settings.embedding_base_url,
-        embedding_model=settings.embedding_model,
-        embedding_dim=settings.embedding_dim,
+    parser = argparse.ArgumentParser(description="初始化 Qdrant 知识库")
+    parser.add_argument(
+        "--markdown-only",
+        action="store_true",
+        help="只上传 data/knowledge_base/ 下的 markdown 文件",
     )
+    parser.add_argument(
+        "--inline-only",
+        action="store_true",
+        help="只上传脚本内置的 KNOWLEDGE_DOCUMENTS",
+    )
+    args = parser.parse_args()
+
+    settings = Settings()
+    tool = KnowledgeSearchTool.create_from_settings()
+
+    documents: list[dict] = []
+    if not args.markdown_only:
+        documents.extend(KNOWLEDGE_DOCUMENTS)
+    markdown_docs: list[dict] = []
+    if not args.inline_only:
+        markdown_docs = load_markdown_documents()
+        documents.extend(markdown_docs)
 
     print(f"连接 Qdrant: {settings.qdrant_url}")
     print(f"Embedding 模型: {settings.embedding_model}")
-    print(f"待导入文档: {len(KNOWLEDGE_DOCUMENTS)} 篇\n")
+    print(f"内置文档: {len(KNOWLEDGE_DOCUMENTS)} 篇")
+    print(f"Markdown 文档: {len(markdown_docs)} 篇 (来源: {KB_DIR})")
+    print(f"待导入总数: {len(documents)} 篇\n")
 
     tool.ensure_collection()
-    total_chunks = tool.add_documents(KNOWLEDGE_DOCUMENTS)
+    total_chunks = tool.add_documents(documents)
 
-    print(f"\n导入完成！共 {len(KNOWLEDGE_DOCUMENTS)} 篇文档，{total_chunks} 个向量块")
+    print(f"\n导入完成！共 {len(documents)} 篇文档，{total_chunks} 个向量块")
+
+    # 分类覆盖统计（合并内置 + markdown）
+    by_category: dict[str, int] = {}
+    for d in documents:
+        by_category[d.get("category", "未分类")] = by_category.get(d.get("category", "未分类"), 0) + 1
     print("分类覆盖:")
-    for cat in ("technical", "billing", "complaint", "inquiry"):
-        count = sum(1 for d in KNOWLEDGE_DOCUMENTS if d["category"] == cat)
+    for cat, count in sorted(by_category.items()):
         print(f"  {cat}: {count} 篇")
 
 
