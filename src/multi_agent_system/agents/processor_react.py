@@ -237,39 +237,40 @@ class ReActProcessorAgent:
                         "references": references,
                     }
 
-                # Try to parse as direct JSON result (backward compat)
-                if raw.strip().startswith("{"):
-                    try:
-                        parsed = parse_json_response(raw)
-                        final_answer = self._extract_json_final_answer(parsed)
-                        if final_answer:
-                            iter_span.set_output({
-                                "raw_response": raw,
-                                "json_final_answer": final_answer,
-                            })
-                            return {
-                                "result": final_answer,
-                                "references": references,
-                            }
-                        if "result" in parsed:
-                            iter_span.set_output({
-                                "raw_response": raw,
-                                "json_result": parsed.get("result", ""),
-                            })
-                            merged_references = self._merge_references(
-                                references,
-                                parsed.get("references", []),
-                            )
-                            return {
-                                "result": parsed.get("result", ""),
-                                "references": merged_references,
-                            }
-                    except json.JSONDecodeError:
-                        pass
+                parsed_json: dict[str, Any] | None = None
+
+                # Try to parse JSON/markdown-code-block result (backward compat)
+                try:
+                    parsed_json = parse_json_response(raw)
+                    final_answer = self._extract_json_final_answer(parsed_json)
+                    if final_answer:
+                        iter_span.set_output({
+                            "raw_response": raw,
+                            "json_final_answer": final_answer,
+                        })
+                        return {
+                            "result": final_answer,
+                            "references": references,
+                        }
+                    if "result" in parsed_json:
+                        iter_span.set_output({
+                            "raw_response": raw,
+                            "json_result": parsed_json.get("result", ""),
+                        })
+                        merged_references = self._merge_references(
+                            references,
+                            parsed_json.get("references", []),
+                        )
+                        return {
+                            "result": parsed_json.get("result", ""),
+                            "references": merged_references,
+                        }
+                except json.JSONDecodeError:
+                    pass
 
                 # Parse Thought and Action
-                thought = self._extract_thought(raw)
-                action = self._extract_action(raw)
+                thought = self._extract_thought(raw, parsed_json)
+                action = self._extract_action(raw, parsed_json)
 
                 if memory:
                     memory.add_thought(thought or f"Iteration {iteration + 1}", iteration)
@@ -396,13 +397,31 @@ class ReActProcessorAgent:
                 return value.strip()
         return ""
 
-    def _extract_thought(self, text: str) -> str:
+    def _extract_thought(self, text: str, parsed: dict[str, Any] | None = None) -> str:
         """从响应中提取 Thought。"""
+        if parsed:
+            for key in ("Thought", "thought"):
+                value = parsed.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
         match = re.search(r"Thought:\s*(.+?)(?=\nAction:|\nFinal Answer:|$)", text, re.DOTALL)
         return match.group(1).strip() if match else ""
 
-    def _extract_action(self, text: str) -> dict[str, Any] | None:
+    def _extract_action(
+        self,
+        text: str,
+        parsed: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
         """从响应中提取 Action JSON。"""
+        if parsed:
+            for key in ("Action", "action"):
+                action = parsed.get(key)
+                if isinstance(action, dict):
+                    tool_name = action.get("tool") or action.get("name")
+                    params = action.get("params") or action.get("arguments") or {}
+                    if isinstance(tool_name, str) and isinstance(params, dict):
+                        return {"tool": tool_name, "params": params}
+
         # Try JSON format first
         json_match = re.search(r"Action:\s*(\{.+?\})", text, re.DOTALL)
         if json_match:

@@ -222,3 +222,75 @@ async def test_react_processor_accepts_json_final_answer(mock_client):
 
     assert result["result"] == "请在结算页选择可用券。"
     assert mock_client.chat_completions_create.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_react_processor_executes_json_action(mock_client):
+    """模型返回 JSON 格式 Action 时，应执行工具而不是空转。"""
+    tool = MockSearchTool()
+    registry = ToolRegistry()
+    registry.register(tool)
+    agent = ReActProcessorAgent(
+        model="test-model",
+        tool_registry=registry,
+        client=mock_client,
+    )
+    mock_client.chat_completions_create = AsyncMock(side_effect=[
+        MagicMock(
+            choices=[
+                MagicMock(
+                    message=MagicMock(
+                        content=(
+                            '{"Thought": "需要补充平台能力概览", '
+                            '"Action": {"tool": "search_knowledge", '
+                            '"params": {"query": "平台能力概览"}}}'
+                        )
+                    )
+                )
+            ]
+        ),
+        MagicMock(
+            choices=[
+                MagicMock(
+                    message=MagicMock(
+                        content='{"Final Answer": "平台提供工单、知识库和数据分析能力。"}'
+                    )
+                )
+            ]
+        ),
+    ])
+
+    result = await agent.process("平台提供哪些能力", "inquiry", "P3")
+
+    assert result["result"] == "平台提供工单、知识库和数据分析能力。"
+    assert "Knowledge about 平台能力概览" in result["references"]
+
+
+@pytest.mark.asyncio
+async def test_react_processor_extracts_final_answer_from_json_like_text(mock_client):
+    """模型把 JSON Final Answer 包在代码块中时，也应结束 ReAct 循环。"""
+    agent = ReActProcessorAgent(
+        model="test-model",
+        client=mock_client,
+    )
+    mock_client.chat_completions_create = AsyncMock(
+        return_value=MagicMock(
+            choices=[
+                MagicMock(
+                    message=MagicMock(
+                        content=(
+                            '```json\n'
+                            '{"Thought": "已有完整方案", '
+                            '"Final Answer": "**处理建议**\\n1. 检查 Nginx upstream timed out\\n2. 重启异常后端节点"}'
+                            '\n```'
+                        )
+                    )
+                )
+            ]
+        )
+    )
+
+    result = await agent.process("后台一直 504", "technical", "P1")
+
+    assert result["result"].startswith("**处理建议**")
+    assert mock_client.chat_completions_create.call_count == 1
