@@ -2,11 +2,65 @@
 
 ## 1. 基本约定
 
-后端接口统一以 `/api` 为前缀。请求和响应默认使用 JSON。接口实现位置为 `src/multi_agent_system/api/routes.py`。
+后端业务接口统一以 `/api` 为前缀。请求和响应默认使用 JSON。接口实现位置为 `src/multi_agent_system/api/routes.py`，鉴权接口位于 `src/multi_agent_system/api/auth_routes.py`。
 
-## 2. 工单接口
+业务路由默认要求登录；当配置项 `auth_enabled=false` 时，`require_login` 会自动放行，便于本地演示。
 
-### 2.1 创建工单
+## 2. 鉴权接口
+
+### 2.1 登录
+
+`POST /api/auth/login`
+
+请求体：
+
+```json
+{
+  "username": "admin",
+  "password": "password"
+}
+```
+
+响应：
+
+```json
+{
+  "username": "admin",
+  "logged_in": true
+}
+```
+
+说明：登录成功后后端写入 `agentdesk_session` cookie。密码使用 bcrypt 哈希校验，明文密码不应进入仓库。
+
+### 2.2 退出登录
+
+`POST /api/auth/logout`
+
+响应：
+
+```json
+{
+  "logged_out": true
+}
+```
+
+### 2.3 当前登录状态
+
+`GET /api/auth/me`
+
+响应：
+
+```json
+{
+  "logged_in": true,
+  "username": "admin",
+  "auth_enabled": true
+}
+```
+
+## 3. 工单接口
+
+### 3.1 创建工单
 
 `POST /api/tickets`
 
@@ -28,9 +82,9 @@
 }
 ```
 
-说明：接口立即返回，后台异步执行 LangGraph 工作流。
+说明：接口会先调用 `TicketIntentAgent` 理解自然语言工单，提取分类、优先级、影响范围等信息并格式化正文；随后立即返回，后台异步执行 LangGraph 工作流。
 
-### 2.2 批量创建工单
+### 3.2 批量创建工单
 
 `POST /api/tickets/batch`
 
@@ -64,7 +118,7 @@
 }
 ```
 
-### 2.3 查询工单详情
+### 3.3 查询工单详情
 
 `GET /api/tickets/{ticket_id}`
 
@@ -77,13 +131,14 @@
 | `category` | string/null | 分类 |
 | `priority` | string/null | 优先级 |
 | `processing_result` | string/null | 处理结果 |
+| `references` | array | 知识库引用列表 |
 | `review_score` | number/null | 审核评分 |
 | `retry_count` | number | 重试次数 |
 | `status` | string | 当前状态 |
 | `error` | string/null | 错误信息 |
 | `created_at` | string | 创建时间 |
 
-### 2.4 查询工单列表
+### 3.4 查询工单列表
 
 `GET /api/tickets?status=&category=&limit=&offset=`
 
@@ -96,7 +151,7 @@
 | `limit` | 返回数量，默认 20，最大 100 |
 | `offset` | 分页偏移 |
 
-### 2.5 提交反馈
+### 3.5 提交反馈
 
 `POST /api/tickets/{ticket_id}/feedback`
 
@@ -118,9 +173,44 @@
 }
 ```
 
-## 3. 知识库接口
+说明：当 `satisfied=false` 且工单已完成时，系统会创建 `user_request` 类型人工审核单，并将工单状态转为 `pending_human_review`。
 
-### 3.1 上传知识文档
+## 4. 知识库接口
+
+### 4.1 查询知识库文档
+
+`GET /api/knowledge?limit=&offset=`
+
+响应：
+
+```json
+{
+  "documents": [
+    {
+      "id": "doc-001",
+      "title": "登录失败处理手册",
+      "category": "technical",
+      "source": null,
+      "content": "完整内容",
+      "preview": "内容预览",
+      "chunk_count": 2,
+      "chunks": [
+        {
+          "index": 0,
+          "content": "分块内容",
+          "point_id": "qdrant-point-id"
+        }
+      ]
+    }
+  ],
+  "count": 1,
+  "next_offset": null
+}
+```
+
+说明：Qdrant 不可用时返回 503。
+
+### 4.2 上传知识文档
 
 `POST /api/knowledge`
 
@@ -144,9 +234,15 @@
 }
 ```
 
-## 4. 统计接口
+## 5. 设置与统计接口
 
-### 4.1 获取统计数据
+### 5.1 获取系统设置摘要
+
+`GET /api/settings`
+
+响应包含 LLM、Embedding、Qdrant、缓存、重试、审核阈值、并发、模型路由和 API 端口等只读配置摘要。敏感字段只返回是否已配置，不返回完整密钥。
+
+### 5.2 获取统计数据
 
 `GET /api/analytics`
 
@@ -159,25 +255,58 @@
 - `efficiency`
 - `evaluation`
 
-## 5. 执行追踪接口
+## 6. 执行追踪接口
 
-### 5.1 查询工单 Trace
+### 6.1 查询工单 Trace
 
 `GET /api/tickets/{ticket_id}/trace`
 
-### 5.2 查询 Trace 列表
+响应包含 trace 基本信息、工单摘要、分类、优先级、处理结果、引用数量和 `spans` 树。
+
+### 6.2 查询 Trace 列表
 
 `GET /api/traces?status=&limit=&offset=`
 
-### 5.3 查询 Trace 统计
+### 6.3 查询 Trace 统计
 
 `GET /api/traces/{trace_id}/stats`
 
-## 6. 人工审核接口（v1.0 新增）
+### 6.4 查询 Trace 决策点
+
+`GET /api/traces/{trace_id}/decisions`
+
+响应：
+
+```json
+{
+  "trace_id": "tr-001",
+  "decision_count": 2,
+  "decisions": [
+    {
+      "span_id": "sp-001",
+      "span_name": "classify",
+      "span_type": "node",
+      "decision_type": "routing",
+      "trigger": {"content_preview": "..."},
+      "options_count": 4,
+      "options": [],
+      "selection_value": "technical",
+      "confidence": 0.92,
+      "reason": "登录失败属于技术问题",
+      "start_time": 1710000000.0,
+      "duration": 0.8
+    }
+  ]
+}
+```
+
+说明：该接口从 `spans.metadata.decision` 中提取分类、审核、重试边界等决策语义。
+
+## 7. 人工审核接口
 
 详细设计参见 [01_正式设计/09_人工审核工作台设计.md](../01_正式设计/09_人工审核工作台设计.md)。
 
-### 6.1 查询待审核队列
+### 7.1 查询待审核队列
 
 `GET /api/reviews/queue`
 
@@ -220,13 +349,13 @@
 }
 ```
 
-### 6.2 查询审核详情
+### 7.2 查询审核详情
 
 `GET /api/reviews/{ticket_id}`
 
 返回该工单的完整审核上下文：原文、分类、优先级、AI 处理结果、trace 摘要、历史决策、当前 AI 建议。
 
-### 6.3 提交审核决策
+### 7.3 提交审核决策
 
 `POST /api/reviews/{ticket_id}/decision`
 
@@ -254,16 +383,22 @@
 
 行为：校验工单状态为 `pending_human_review` → 写入决策 → 触发 `apply_human_decision` 节点 → 推送 WebSocket `review_decided` 事件。
 
+校验规则：
+
+- 工单不存在返回 404。
+- 工单状态不是 `pending_human_review` 返回 409。
+- `decision_reason` 必填且不能为空白。
+- `decision=rewrite` 时 `rewritten_result` 必填。
+
 错误码：
 
 | HTTP | 错误码 | 场景 |
 | --- | --- | --- |
-| 404 | `TICKET_NOT_FOUND` | 工单不存在 |
-| 409 | `TICKET_NOT_PENDING` | 工单不在待审核状态 |
-| 400 | `REWRITE_RESULT_REQUIRED` | decision=rewrite 但未提供 rewritten_result |
-| 400 | `DECISION_REASON_REQUIRED` | 未填写决策理由 |
+| 404 | `detail` 文本 | 工单不存在 |
+| 409 | `detail` 文本 | 工单不在待审核状态 |
+| 422 | Pydantic 校验错误 | decision_reason 为空，或 rewrite 未提供 rewritten_result |
 
-### 6.4 审核统计
+### 7.4 审核统计
 
 `GET /api/reviews/stats`
 
@@ -278,3 +413,13 @@
 ```
 
 `ai_adoption_rate` 表示审核员最终决策与 AI 建议一致的比例，是论文的核心评估指标。
+
+## 8. 健康检查与指标接口
+
+这些接口由 `api/app.py` 注册，不带 `/api` 前缀。
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/health` | 服务健康状态、缓存和模型路由摘要 |
+| GET | `/metrics` | JSON 格式运行指标 |
+| GET | `/prometheus` | Prometheus exposition 格式指标 |

@@ -13,6 +13,7 @@
 | `category` | string/null | 分类结果 |
 | `priority` | string/null | 优先级 |
 | `processing_result` | string/null | 处理结果 |
+| `references` | list | 知识库引用列表 |
 | `review_score` | number/null | 审核评分 |
 | `retry_count` | number | 重试次数 |
 | `status` | string | 当前状态 |
@@ -20,8 +21,34 @@
 | `error` | string/null | 错误信息 |
 | `user_context` | object | 用户上下文，可选 |
 | `__trace_id__` | string/null | 执行追踪 ID |
+| `trigger_type` | string/null | 人工审核触发类型 |
+| `trigger_reason` | string/null | 人工审核触发原因 |
+| `__human_decision__` | object/null | 人工审核恢复时注入的决策信息 |
 
-## 2. ClassifierAgent 输出
+## 2. TicketIntentAgent 输出
+
+```json
+{
+  "title": "后台 504 无法登录",
+  "category": "technical",
+  "priority": "P1",
+  "impact": "部分用户受影响",
+  "expectation": "请尽快定位并恢复服务",
+  "contact": "ops@example.com",
+  "occurred_at": "今天 上午 10:15",
+  "confidence": 0.86,
+  "reason": "描述包含 504 和无法登录",
+  "content": "【问题标题】后台 504 无法登录\n【问题类型】技术支持\n..."
+}
+```
+
+约束：
+
+- `category` 和 `priority` 必须落在系统枚举范围内。
+- `content` 是后续 LangGraph 工作流消费的格式化正文。
+- LLM 不可用时允许使用本地规则兜底。
+
+## 3. ClassifierAgent 输出
 
 ```json
 {
@@ -37,7 +64,7 @@
 - `priority` 必须属于 `P0`、`P1`、`P2`、`P3`。
 - `reason` 应简短说明分类依据。
 
-## 3. ProcessorAgent 输出
+## 4. ReActProcessorAgent 输出
 
 ```json
 {
@@ -57,7 +84,7 @@
 - `references` 可以为空数组。
 - 如果知识库不可用，允许只返回 `result`。
 
-## 4. ReviewerAgent 输出
+## 5. ReviewerAgent 输出
 
 ```json
 {
@@ -71,7 +98,7 @@
 - `score` 范围为 0 到 1。
 - `feedback` 应说明通过或不通过的原因。
 
-## 5. CoordinatorAgent 输出
+## 6. CoordinatorAgent 输出
 
 升级处理示例：
 
@@ -93,7 +120,35 @@
 }
 ```
 
-## 6. 消息链约定
+人工审核辅助决策示例：
+
+```json
+{
+  "recommended_decision": "rewrite",
+  "confidence": 0.72,
+  "reasoning": "AI 结果方向正确，但缺少具体操作步骤",
+  "key_concerns": ["处理步骤不完整", "需补充联系方式确认"]
+}
+```
+
+## 7. 人工审核决策输入
+
+```json
+{
+  "decision": "rewrite",
+  "decision_reason": "补充更清晰的排查步骤",
+  "rewritten_result": "请先确认账号状态，再检查登录接口日志和 504 时间段网关日志。",
+  "reviewer_id": "reviewer-001"
+}
+```
+
+约束：
+
+- `decision` 只能是 `approve`、`reject`、`rewrite`、`reprocess`。
+- `decision_reason` 必填且不能为空白。
+- `decision=rewrite` 时 `rewritten_result` 必填。
+
+## 8. 消息链约定
 
 每个节点可向 `messages` 追加一条记录：
 
@@ -105,4 +160,3 @@
 ```
 
 消息链主要用于调试、追踪和详情展示，不作为强一致业务数据。
-
