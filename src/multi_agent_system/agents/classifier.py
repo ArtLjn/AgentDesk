@@ -9,6 +9,7 @@ from src.multi_agent_system.config import Settings
 from src.multi_agent_system.core import CachedLLMClient, FallbackRegistry, fallback_registry, track_agent_execution, with_retry
 from src.multi_agent_system.core.exceptions import NonRetryableError, RetryableError
 from src.multi_agent_system.core.json_parser import parse_json_response
+from src.multi_agent_system.core.risk_policy import assess_ticket_risk
 from src.multi_agent_system.models.ticket import TicketCategory, TicketPriority
 
 __all__ = ["ClassifierAgent"]
@@ -25,13 +26,13 @@ _CLASSIFIER_SYSTEM_PROMPT = """\
 
 优先级规则：
 - P0: 系统完全不可用、大规模故障、数据丢失
-- P1: 核心功能故障、紧急投诉、资金异常
+- P1: 核心功能故障、紧急投诉、资金异常、疑似安全漏洞或高危风险
 - P2: 一般功能问题、普通计费问题
 - P3: 咨询类、轻微问题
 
 注意：category 只能选一个，不要组合多个分类。
 请严格按照以下 JSON 格式输出，不要添加任何额外内容：
-{"category": "technical 或 billing 或 complaint 或 inquiry（只选一个）", "priority": "P0 或 P1 或 P2 或 P3（只选一个）", "confidence": 0.0~1.0 的置信度, "reason": "分类和优先级判断的简要理由"}\
+{"category": "technical 或 billing 或 complaint 或 inquiry（只选一个）", "priority": "P0 或 P1 或 P2 或 P3（只选一个）", "risk_level": "low 或 medium 或 high 或 critical", "requires_human_review": true 或 false, "risk_reason": "触发人工审核的风险原因，没有则为空字符串", "confidence": 0.0~1.0 的置信度, "reason": "分类和优先级判断的简要理由"}\
 """
 
 # 关键词降级规则（与 graph.py 中的占位逻辑一致）
@@ -182,9 +183,23 @@ class ClassifierAgent:
             logger.warning(f"LLM 返回非法优先级 '{priority}'，降级到 P3")
             priority = TicketPriority.P3.value
 
+        risk = assess_ticket_risk(
+            content,
+            category=category,
+            priority=priority,
+            agent_risk={
+                "risk_level": result.get("risk_level"),
+                "requires_human_review": result.get("requires_human_review"),
+                "risk_reason": result.get("risk_reason"),
+            },
+        )
+
         return {
             "category": category,
             "priority": priority,
+            "risk_level": risk.risk_level,
+            "requires_human_review": risk.requires_human_review,
+            "risk_reason": risk.reason,
             "reason": reason,
             "confidence": confidence,
         }
@@ -213,11 +228,30 @@ class ClassifierAgent:
     @staticmethod
     def _match_keyword_rule(content: str, confidence: float) -> dict | None:
         """按关键词规则分类，未匹配时返回 None。"""
+        risk = assess_ticket_risk(content)
+        if risk.requires_human_review:
+            return {
+                "category": TicketCategory.TECHNICAL.value,
+                "priority": TicketPriority.P1.value,
+                "risk_level": risk.risk_level,
+                "requires_human_review": True,
+                "risk_reason": risk.reason,
+                "reason": "风险策略要求人工审核",
+                "confidence": confidence,
+            }
         for keyword, (category, priority) in _FALLBACK_RULES.items():
             if keyword in content:
+                risk = assess_ticket_risk(
+                    content,
+                    category=category,
+                    priority=priority,
+                )
                 return {
                     "category": category,
                     "priority": priority,
+                    "risk_level": risk.risk_level,
+                    "requires_human_review": risk.requires_human_review,
+                    "risk_reason": risk.reason,
                     "reason": f"关键词规则匹配：匹配到 '{keyword}'",
                     "confidence": confidence,
                 }

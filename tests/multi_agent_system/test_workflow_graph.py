@@ -138,6 +138,19 @@ class TestTicketWorkflow:
         assert result["processing_result"] is not None
 
     @pytest.mark.asyncio
+    async def test_security_report_escalates_to_human_review(self, graph):
+        """漏洞/安全风险上报应进入人工审核队列，不自动归档。"""
+        result = await graph.ainvoke(
+            create_initial_state("我发现支付功能有漏洞，付款后跳转到不知名网页")
+        )
+
+        assert result["category"] == "technical"
+        assert result["priority"] == "P1"
+        assert result["status"] == "pending_human_review"
+        assert result["trigger_type"] == "escalate"
+        assert "人工审核" in result["trigger_reason"]
+
+    @pytest.mark.asyncio
     async def test_messages_chain(self, graph):
         """Agent 间消息链完整，包含 receive/classifier/notifier/complete 角色。"""
         result = await graph.ainvoke(create_initial_state("如何导出报表？"))
@@ -204,6 +217,14 @@ class TestRouteDecision:
         state = create_initial_state("紧急问题")
         state["category"] = "technical"
         state["priority"] = "P0"
+
+        assert route_decision(state) == "escalate"
+
+    def test_security_risk_routes_to_escalate_even_when_technical_p1(self):
+        """漏洞/安全风险类工单即使是 technical/P1 也应转人工审核。"""
+        state = create_initial_state("我发现支付功能有漏洞，付款后会跳转到不知名网页")
+        state["category"] = "technical"
+        state["priority"] = "P1"
 
         assert route_decision(state) == "escalate"
 

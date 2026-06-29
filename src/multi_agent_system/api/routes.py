@@ -93,6 +93,9 @@ async def create_ticket(body: TicketCreate, request: Request) -> dict:
     state = create_initial_state(content=intent["content"])
     state["category"] = intent.get("category")
     state["priority"] = intent.get("priority")
+    state["risk_level"] = intent.get("risk_level")
+    state["requires_human_review"] = intent.get("requires_human_review")
+    state["risk_reason"] = intent.get("risk_reason")
     ticket_id = state["ticket_id"]
 
     # 保存初始状态到数据库

@@ -11,6 +11,7 @@ from src.multi_agent_system.config import Settings
 from src.multi_agent_system.core import CachedLLMClient, track_agent_execution, with_retry
 from src.multi_agent_system.core.exceptions import NonRetryableError, RetryableError
 from src.multi_agent_system.core.json_parser import parse_json_response
+from src.multi_agent_system.core.risk_policy import assess_ticket_risk
 from src.multi_agent_system.models.ticket import TicketCategory, TicketPriority
 
 __all__ = ["TicketIntentAgent"]
@@ -26,7 +27,7 @@ _INTENT_SYSTEM_PROMPT = """\
 
 优先级 priority 只能从以下值中选择：
 - P0: 系统完全不可用、大规模故障、核心业务不可用、数据丢失
-- P1: 核心功能异常、影响多人、资金异常、紧急投诉
+- P1: 核心功能异常、影响多人、资金异常、紧急投诉、疑似安全漏洞或高危风险
 - P2: 一般功能问题、普通账务问题、需要人工处理
 - P3: 咨询、建议、低影响问题
 
@@ -39,6 +40,9 @@ _INTENT_SYSTEM_PROMPT = """\
   "expectation": "用户期望处理结果，没有则为空字符串",
   "contact": "联系方式，没有则为空字符串",
   "occurred_at": "发生时间，没有则为空字符串",
+  "risk_level": "low 或 medium 或 high 或 critical",
+  "requires_human_review": true 或 false,
+  "risk_reason": "需要人工审核的风险原因，没有则为空字符串",
   "confidence": 0.0 到 1.0,
   "reason": "简短说明判断依据"
 }\
@@ -181,6 +185,20 @@ class TicketIntentAgent:
             category = TicketCategory.INQUIRY.value
         if priority not in _VALID_PRIORITIES:
             priority = TicketPriority.P3.value
+        risk = assess_ticket_risk(
+            original_content,
+            category=category,
+            priority=priority,
+            agent_risk={
+                "risk_level": result.get("risk_level"),
+                "requires_human_review": result.get("requires_human_review"),
+                "risk_reason": result.get("risk_reason"),
+            },
+        )
+        if risk.requires_human_review and risk.risk_level in {"high", "critical"}:
+            category = TicketCategory.TECHNICAL.value
+            if priority not in {TicketPriority.P0.value, TicketPriority.P1.value}:
+                priority = TicketPriority.P1.value
 
         title = str(result.get("title") or TicketIntentAgent._build_title(original_content)).strip()
         impact = str(result.get("impact") or TicketIntentAgent._guess_impact(original_content, priority)).strip()
@@ -201,6 +219,9 @@ class TicketIntentAgent:
             "expectation": expectation,
             "contact": contact,
             "occurred_at": occurred_at,
+            "risk_level": risk.risk_level,
+            "requires_human_review": risk.requires_human_review,
+            "risk_reason": risk.reason,
             "confidence": confidence,
             "reason": reason,
         }
@@ -225,6 +246,10 @@ class TicketIntentAgent:
             rows.append(f"【发生时间】{result['occurred_at']}")
         if result["contact"]:
             rows.append(f"【联系方式】{result['contact']}")
+        rows.append(f"【风险等级】{result['risk_level']}")
+        rows.append(f"【需人工审核】{'是' if result['requires_human_review'] else '否'}")
+        if result["requires_human_review"]:
+            rows.append(f"【风险原因】{result['risk_reason']}")
         if result["reason"]:
             rows.append(f"【Agent判断】{result['reason']}，置信度 {result['confidence']:.2f}")
         rows.append(f"【原始描述】{original_content}")
@@ -232,6 +257,8 @@ class TicketIntentAgent:
 
     @staticmethod
     def _guess_category(content: str) -> str:
+        if assess_ticket_risk(content).requires_human_review:
+            return TicketCategory.TECHNICAL.value
         for category, pattern in _CATEGORY_KEYWORDS:
             if re.search(pattern, content, flags=re.IGNORECASE):
                 return category
@@ -241,6 +268,8 @@ class TicketIntentAgent:
     def _guess_priority(content: str, category: str) -> str:
         if re.search(r"核心业务不可用|完全不可用|全部用户|大规模|数据丢失|无法访问", content):
             return TicketPriority.P0.value
+        if assess_ticket_risk(content, category=category).requires_human_review:
+            return TicketPriority.P1.value
         if re.search(r"紧急|多人|部分用户|扣费|多扣|投诉|无法登录|504|资金", content):
             return TicketPriority.P1.value
         if category in {TicketCategory.TECHNICAL.value, TicketCategory.BILLING.value}:

@@ -25,3 +25,14 @@ def test_fallback_marks_core_outage_as_p0() -> None:
     assert result["category"] == "technical"
     assert result["priority"] == "P0"
     assert result["impact"] == "全部用户受影响"
+
+
+def test_fallback_marks_security_report_as_p1_technical() -> None:
+    """漏洞/安全风险上报应被兜底为 P1 技术工单。"""
+    result = TicketIntentAgent.extract_by_fallback(
+        "我发现你们支付功能有漏洞，支付之后跳转到一个不知名网页，疑似被劫持"
+    )
+
+    assert result["category"] == "technical"
+    assert result["priority"] == "P1"
+    assert "漏洞" in result["content"]

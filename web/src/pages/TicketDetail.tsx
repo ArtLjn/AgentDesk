@@ -1,7 +1,9 @@
-import { useMemo, useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useTicket, useTicketTrace, useTraceDecisions } from '@/hooks/useApi'
-import type { Span, TraceDetail, TraceDecisionsResponse } from '@/types'
+import { useWebSocket } from '@/hooks/useWebSocket'
+import type { Span, TraceDetail, TraceDecisionsResponse, WSMessage } from '@/types'
 import { buildKnowledgeSearchParams } from '@/lib/knowledgeReference'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -24,16 +26,30 @@ import {
 export function TicketDetail() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
+  const qc = useQueryClient()
   const { data: ticket, isLoading } = useTicket(id!)
   const ticketStatus = ticket?.status
   const isRunning = !!ticketStatus && !['completed', 'failed'].includes(ticketStatus)
   const { data: trace } = useTicketTrace(id!, isRunning)
   const traceDetail = trace as TraceDetail | undefined
-  const { data: decisionsResp } = useTraceDecisions(traceDetail?.trace_id || '')
+  const traceId = traceDetail?.trace_id || ''
+  const { data: decisionsResp } = useTraceDecisions(traceId)
   const decisions = (decisionsResp as TraceDecisionsResponse | undefined)?.decisions || []
   const flatSpans = useMemo(() => flattenSpans(traceDetail?.spans || []), [traceDetail])
   const [selectedSpan, setSelectedSpan] = useState<Span | null>(null)
   const [sheetOpen, setSheetOpen] = useState(false)
+
+  const refreshTicketSnapshot = useCallback((msg: WSMessage) => {
+    if (!id || msg.ticket_id !== id) return
+    qc.invalidateQueries({ queryKey: ['ticket', id] })
+    qc.invalidateQueries({ queryKey: ['tickets'] })
+    qc.invalidateQueries({ queryKey: ['ticketTrace', id] })
+    if (traceId) {
+      qc.invalidateQueries({ queryKey: ['traceDecisions', traceId] })
+    }
+  }, [id, qc, traceId])
+
+  useWebSocket(refreshTicketSnapshot)
 
   const slowestSpan = flatSpans.reduce<Span | null>((slowest, span) => {
     if (!slowest) return span

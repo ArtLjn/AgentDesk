@@ -22,6 +22,9 @@ class TicketState(TypedDict):
         error: 错误信息
         trigger_type: 人工审核触发类型（escalate/review_failed/error_fallback/user_request）
         trigger_reason: 触发原因描述
+        risk_level: 风险等级（low/medium/high/critical）
+        requires_human_review: 是否需要人工审核
+        risk_reason: 风险原因
         __human_decision__: 人工决策信息（仅 resume_from_human_decision 时注入）
         __review_requested__: 标记需广播 review_requested 事件
         __review_decided__: 标记需广播 review_decided 事件
@@ -50,6 +53,9 @@ class TicketState(TypedDict):
     # 人工审核相关字段（全部 Optional，向后兼容）
     trigger_type: str | None            # 触发类型，由调用方预设
     trigger_reason: str | None          # 触发原因描述
+    risk_level: str | None              # 风险等级
+    requires_human_review: bool | None  # 是否需要人工审核
+    risk_reason: str | None             # 风险原因
     __human_decision__: dict | None     # 人工决策信息（仅 resume 时注入）
     __review_requested__: bool | None   # 标记需广播 review_requested 事件
     __review_decided__: bool | None     # 标记需广播 review_decided 事件

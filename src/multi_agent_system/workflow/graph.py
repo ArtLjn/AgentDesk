@@ -12,6 +12,7 @@ from loguru import logger
 
 from src.multi_agent_system.config import Settings
 from src.multi_agent_system.core.logging import generate_trace_id, log_context, trace_id_var
+from src.multi_agent_system.core.risk_policy import assess_ticket_risk
 from src.multi_agent_system.models.ticket import TicketCategory, TicketPriority
 from src.multi_agent_system.workflow.state import TicketState
 
@@ -82,6 +83,9 @@ def create_initial_state(content: str, ticket_id: str | None = None) -> TicketSt
         status="received",
         messages=[],
         error=None,
+        risk_level=None,
+        requires_human_review=None,
+        risk_reason=None,
     )
 
 
@@ -276,6 +280,12 @@ async def classify(state: TicketState) -> dict:
                 priority = result["priority"]
                 reason = result.get("reason", "")
                 confidence = result.get("confidence")
+                risk = assess_ticket_risk(
+                    content,
+                    category=category,
+                    priority=priority,
+                    agent_risk=result,
+                )
                 span.set_output({"category": category, "priority": priority})
                 span.set_metadata({"decision": _build_classify_decision(
                     content=content,
@@ -286,6 +296,9 @@ async def classify(state: TicketState) -> dict:
                 return {
                     "category": category,
                     "priority": priority,
+                    "risk_level": risk.risk_level,
+                    "requires_human_review": risk.requires_human_review,
+                    "risk_reason": risk.reason,
                     "status": "classifying",
                     "messages": state["messages"]
                     + [
@@ -299,10 +312,18 @@ async def classify(state: TicketState) -> dict:
             # 占位分类：关键词匹配
             for keyword, (category, priority) in _CLASSIFY_RULES.items():
                 if keyword in content:
+                    risk = assess_ticket_risk(
+                        content,
+                        category=category,
+                        priority=priority,
+                    )
                     span.set_output({"category": category, "priority": priority})
                     return {
                         "category": category,
                         "priority": priority,
+                        "risk_level": risk.risk_level,
+                        "requires_human_review": risk.requires_human_review,
+                        "risk_reason": risk.reason,
                         "status": "classifying",
                         "messages": state["messages"]
                         + [
@@ -314,16 +335,30 @@ async def classify(state: TicketState) -> dict:
                     }
 
             # 默认分类为咨询，优先级 P3
-            span.set_output({"category": TicketCategory.INQUIRY.value, "priority": TicketPriority.P3.value})
+            risk = assess_ticket_risk(
+                content,
+                category=TicketCategory.INQUIRY.value,
+                priority=TicketPriority.P3.value,
+            )
+            if risk.requires_human_review:
+                category = TicketCategory.TECHNICAL.value
+                priority = TicketPriority.P1.value
+            else:
+                category = TicketCategory.INQUIRY.value
+                priority = TicketPriority.P3.value
+            span.set_output({"category": category, "priority": priority})
             return {
-                "category": TicketCategory.INQUIRY.value,
-                "priority": TicketPriority.P3.value,
+                "category": category,
+                "priority": priority,
+                "risk_level": risk.risk_level,
+                "requires_human_review": risk.requires_human_review,
+                "risk_reason": risk.reason,
                 "status": "classifying",
                 "messages": state["messages"]
                 + [
                     {
                         "role": "classifier",
-                        "content": f"分类结果: {TicketCategory.INQUIRY.value}, 优先级: {TicketPriority.P3.value}（默认）",
+                        "content": f"分类结果: {category}, 优先级: {priority}（默认）",
                     }
                 ],
             }
@@ -458,12 +493,24 @@ async def escalate(state: TicketState) -> dict:
         async with _span("escalate", input_data={"category": state.get("category"), "priority": state.get("priority")}) as span:
             category = state.get("category", "")
             priority = state.get("priority", "P3")
-
-            reason = (
-                "P0 紧急工单"
-                if priority == TicketPriority.P0.value
-                else f"投诉类工单（分类: {category}）"
+            content = state.get("content", "")
+            risk = assess_ticket_risk(
+                content,
+                category=category,
+                priority=priority,
+                agent_risk={
+                    "risk_level": state.get("risk_level"),
+                    "requires_human_review": state.get("requires_human_review"),
+                    "risk_reason": state.get("risk_reason"),
+                },
             )
+
+            if risk.requires_human_review:
+                reason = risk.reason
+            elif priority == TicketPriority.P0.value:
+                reason = "P0 紧急工单"
+            else:
+                reason = f"投诉类工单（分类: {category}）"
             escalation_msg = f"已升级至人工处理，原因: {reason}"
             span.set_output({"reason": reason})
 
@@ -538,13 +585,27 @@ async def handle_failure(state: TicketState) -> dict:
 def route_decision(state: TicketState) -> Literal["auto_reply", "escalate", "process"]:
     """路由决策：根据分类和优先级选择处理路径。
 
+    - 安全/漏洞风险 -> escalate
     - 投诉类 -> escalate
     - P0 优先级 -> escalate
     - 其他（含咨询）-> process
     """
     category = state.get("category", "")
     priority = state.get("priority", "P3")
+    content = state.get("content", "")
+    risk = assess_ticket_risk(
+        content,
+        category=category,
+        priority=priority,
+        agent_risk={
+            "risk_level": state.get("risk_level"),
+            "requires_human_review": state.get("requires_human_review"),
+            "risk_reason": state.get("risk_reason"),
+        },
+    )
 
+    if risk.requires_human_review:
+        return "escalate"
     if category == TicketCategory.COMPLAINT.value:
         return "escalate"
     if priority == TicketPriority.P0.value:
