@@ -30,7 +30,9 @@ __all__ = [
     "create_initial_state",
     "human_decision_router",
     "human_review_wait",
+    "pause_for_user_input",
     "resume_from_human_decision",
+    "resume_from_user_input",
 ]
 
 
@@ -280,11 +282,32 @@ async def classify(state: TicketState) -> dict:
                 priority = result["priority"]
                 reason = result.get("reason", "")
                 confidence = result.get("confidence")
+                existing_requires_review = bool(state.get("requires_human_review"))
+                existing_risk_reason = state.get("risk_reason")
+                requires_human_review = (
+                    existing_requires_review
+                    or bool(result.get("requires_human_review"))
+                )
+                risk_reason = (
+                    existing_risk_reason
+                    if existing_requires_review
+                    else result.get("risk_reason")
+                )
+                risk_level = (
+                    state.get("risk_level")
+                    if existing_requires_review
+                    else result.get("risk_level")
+                )
                 risk = assess_ticket_risk(
                     content,
                     category=category,
                     priority=priority,
-                    agent_risk=result,
+                    agent_risk={
+                        **result,
+                        "risk_level": risk_level,
+                        "requires_human_review": requires_human_review,
+                        "risk_reason": risk_reason,
+                    },
                 )
                 span.set_output({"category": category, "priority": priority})
                 span.set_metadata({"decision": _build_classify_decision(
@@ -386,6 +409,12 @@ async def process(state: TicketState) -> dict:
             category = state.get("category", "")
             priority = state.get("priority", "P3")
             content = state["content"]
+            conversation_context = state.get("conversation_context")
+            if conversation_context:
+                content = (
+                    f"{content}\n\n补充信息记录：\n{conversation_context}\n"
+                    "请结合原始工单和补充信息处理。"
+                )
 
             # Agent 可用时，直接调用（重试/降级由装饰器处理）
             if _processor_agent is not None:
@@ -1070,6 +1099,25 @@ def _build_resume_subgraph() -> Any:
     return graph.compile()
 
 
+def _build_user_input_resume_subgraph() -> Any:
+    """构造用户补充信息后从 process 开始的恢复子图。"""
+    graph = StateGraph(TicketState)
+    graph.add_node("process", process)
+    graph.add_node("review", review)
+    graph.add_node("retry_check", retry_check)
+    graph.add_node("human_review_wait", human_review_wait)
+    graph.add_node("notify", notify)
+    graph.add_node("complete", complete)
+    graph.add_edge(START, "process")
+    graph.add_edge("process", "review")
+    graph.add_conditional_edges("review", review_decision)
+    graph.add_conditional_edges("retry_check", retry_decision)
+    graph.add_edge("human_review_wait", END)
+    graph.add_edge("notify", "complete")
+    graph.add_edge("complete", END)
+    return graph.compile()
+
+
 def _build_resume_state(
     ticket: dict[str, Any], decision_info: dict[str, Any]
 ) -> TicketState:
@@ -1089,6 +1137,183 @@ def _build_resume_state(
         __trace_id__=ticket.get("trace_id"),
         __human_decision__=decision_info,
     )
+
+
+async def _build_user_input_resume_state(
+    ticket: dict[str, Any],
+    messages: list[dict[str, Any]],
+) -> TicketState:
+    """从 DB 工单快照与沟通记录构造用户补充恢复 state。"""
+    conversation_context = "\n".join(
+        f"[{m.get('sender_type')}] {m.get('content')}"
+        for m in messages[-20:]
+    )
+    return TicketState(
+        ticket_id=ticket.get("ticket_id", ""),
+        content=ticket.get("content", ""),
+        category=ticket.get("category"),
+        priority=ticket.get("priority"),
+        processing_result=None,
+        references=ticket.get("references") or [],
+        review_score=None,
+        retry_count=0,
+        status="processing",
+        messages=[],
+        error=ticket.get("error"),
+        __trace_id__=ticket.get("trace_id"),
+        conversation_context=conversation_context,
+    )
+
+
+async def pause_for_user_input(
+    app: Any,
+    ticket_id: str,
+    decision_reason: str,
+    reviewer_id: str,
+) -> dict[str, Any]:
+    """人工请求用户补充信息，关闭审核单并暂停工单。"""
+    global _trace_manager  # noqa: PLW0603
+    db_manager = app.state.db_manager
+    app_trace_manager = getattr(app.state, "trace_manager", None)
+    if app_trace_manager is not None:
+        _trace_manager = app_trace_manager
+    pending = await db_manager.get_pending_review_by_ticket(ticket_id)
+    if pending is None:
+        logger.warning(f"pause_for_user_input: 未找到 {ticket_id} 的 pending 审核单")
+        return {
+            "ticket_id": ticket_id,
+            "status": "waiting_user_input",
+            "next_node": "waiting_user_input",
+            "workflow_resumed": False,
+        }
+
+    from datetime import datetime
+    decided_at = datetime.now().isoformat()
+
+    await db_manager.update_review_decision(
+        pending["review_id"],
+        {
+            "decision": "request_info",
+            "decision_reason": decision_reason,
+            "reviewer_id": reviewer_id,
+            "status": "decided",
+            "decided_at": decided_at,
+        },
+    )
+
+    existing = await db_manager.get_ticket(ticket_id) or {}
+    await db_manager.save_ticket({
+        **existing,
+        "ticket_id": ticket_id,
+        "status": "waiting_user_input",
+    })
+
+    await db_manager.create_ticket_message({
+        "message_id": f"TM-{generate_trace_id()}",
+        "ticket_id": ticket_id,
+        "sender_type": "reviewer",
+        "sender_id": reviewer_id,
+        "content": decision_reason,
+        "metadata": {
+            "source": "request_info",
+            "review_id": pending["review_id"],
+        },
+    })
+    trace = await db_manager.get_trace_by_ticket(ticket_id)
+    trace_id = trace.get("trace_id") if trace else None
+    if trace_id and _trace_manager is not None:
+        async with _trace_manager.start_span(
+            "user_input_requested",
+            "node",
+            trace_id=trace_id,
+            input_data={
+                "ticket_id": ticket_id,
+                "review_id": pending["review_id"],
+                "reviewer_id": reviewer_id,
+                "reason_length": len(decision_reason),
+            },
+        ) as span:
+            span.set_output({"status": "waiting_user_input"})
+
+    return {
+        "status": "ok",
+        "ticket_id": ticket_id,
+        "next_node": "waiting_user_input",
+        "workflow_resumed": False,
+    }
+
+
+async def resume_from_user_input(app: Any, ticket_id: str) -> dict[str, Any]:
+    """用户补充信息后，从 process 节点恢复工单处理。"""
+    global _active_trace_id, _trace_manager  # noqa: PLW0603
+    db_manager = app.state.db_manager
+    db_tool = app.state.db_tool
+    app_trace_manager = getattr(app.state, "trace_manager", None)
+    if app_trace_manager is not None:
+        _trace_manager = app_trace_manager
+    existing = await db_manager.get_ticket(ticket_id) or {}
+    messages = await db_manager.list_ticket_messages(ticket_id)
+    initial_state = await _build_user_input_resume_state(existing, messages)
+    trace = await db_manager.get_trace_by_ticket(ticket_id)
+    trace_id = trace.get("trace_id") if trace else None
+    if trace_id:
+        from src.multi_agent_system.core.trace import current_trace_id
+
+        current_trace_id.set(trace_id)
+        _active_trace_id = trace_id
+        initial_state["__trace_id__"] = trace_id
+
+    await db_manager.save_ticket({
+        **existing,
+        "ticket_id": ticket_id,
+        "processing_result": None,
+        "review_score": None,
+        "retry_count": 0,
+        "status": "processing",
+    })
+
+    subgraph = _build_user_input_resume_subgraph()
+    next_node: str | None = None
+    final_status = "processing"
+    current_snapshot: dict[str, Any] = {
+        **existing,
+        "processing_result": None,
+        "review_score": None,
+        "retry_count": 0,
+        "status": "processing",
+    }
+    latest_message = messages[-1] if messages else {}
+    async with _span(
+        "user_input_resume",
+        input_data={
+            "ticket_id": ticket_id,
+            "message_count": len(messages),
+            "latest_sender": latest_message.get("sender_type"),
+        },
+    ) as span:
+        async for event in subgraph.astream(initial_state):
+            for node_name, node_output in event.items():
+                if not isinstance(node_output, dict):
+                    continue
+                next_node = node_name
+                current_snapshot.update(node_output)
+                if "status" in node_output:
+                    final_status = node_output["status"]
+
+                merged = {**current_snapshot, "ticket_id": ticket_id}
+                await db_tool.save_ticket(merged)
+        span.set_output({
+            "next_node": next_node,
+            "ticket_status": final_status,
+        })
+
+    return {
+        "status": "ok",
+        "ticket_id": ticket_id,
+        "next_node": next_node,
+        "workflow_resumed": True,
+        "ticket_status": final_status,
+    }
 
 
 async def resume_from_human_decision(

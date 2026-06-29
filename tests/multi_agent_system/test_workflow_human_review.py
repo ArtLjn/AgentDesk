@@ -17,8 +17,10 @@ from src.multi_agent_system.workflow.graph import (
     human_decision_router,
     human_review_wait,
     resume_from_human_decision,
+    resume_from_user_input,
     retry_decision,
 )
+from src.multi_agent_system.core.trace import TraceManager
 
 
 def _make_state(**overrides: Any) -> dict[str, Any]:
@@ -83,6 +85,7 @@ def reset_module_state():
     graph_module._coordinator_agent = None
     graph_module._db_manager = None
     graph_module._trace_manager = None
+    graph_module._active_trace_id = None
 
 
 class TestHumanReviewWaitNode:
@@ -346,6 +349,62 @@ class TestResumeFromHumanDecision:
         assert len(saved) >= 1
         # 最终状态应为 completed（approve → notify → complete）
         assert saved[-1]["status"] == "completed"
+
+
+class _TraceProcessor:
+    async def process(self, content: str, category: str, priority: str) -> dict:
+        return {"result": f"已处理: {content[:20]}", "references": []}
+
+
+class _TraceReviewer:
+    async def review(self, content: str, processing_result: str, category: str) -> dict:
+        return {"score": 0.9, "feedback": "通过"}
+
+
+class TestResumeFromUserInputTrace:
+    """用户补充后的恢复流程应写入同一条 trace。"""
+
+    @pytest.mark.asyncio
+    async def test_resume_from_user_input_records_trace_spans(self, db_manager):
+        app = MagicMock()
+        trace_manager = TraceManager(db_manager)
+        trace_id = await trace_manager.start_trace("TK-user-trace")
+        await trace_manager.finish_trace(trace_id, "completed")
+
+        await db_manager.save_ticket({
+            "ticket_id": "TK-user-trace",
+            "content": "退款没有到账",
+            "category": "billing",
+            "priority": "P2",
+            "status": "waiting_user_input",
+            "retry_count": 0,
+        })
+        await db_manager.create_ticket_message({
+            "message_id": "TM-user-trace-1",
+            "ticket_id": "TK-user-trace",
+            "sender_type": "user",
+            "sender_id": "user-001",
+            "content": "订单号是 123456",
+        })
+
+        app.state.db_manager = db_manager
+        app.state.db_tool = db_manager
+        app.state.trace_manager = trace_manager
+
+        graph_module._trace_manager = trace_manager
+        graph_module._db_manager = db_manager
+        graph_module._processor_agent = _TraceProcessor()
+        graph_module._reviewer_agent = _TraceReviewer()
+        graph_module._active_trace_id = None
+
+        result = await resume_from_user_input(app, "TK-user-trace")
+
+        assert result["workflow_resumed"] is True
+        spans = await db_manager.get_spans_by_trace(trace_id)
+        names = [span["name"] for span in spans]
+        assert "user_input_resume" in names
+        assert "process" in names
+        assert "review" in names
 
 
 class TestRoutingChanges:

@@ -45,11 +45,23 @@ _REACT_SYSTEM_PROMPT = """\
 - 工具参数必须严格符合 Schema
 - 如果附加上下文包含“知识库预检索结果”且检索到知识片段，最终答案必须优先依据这些知识片段
 - 如果已有足够信息，直接给出 Final Answer
+- 不要同时输出 Action 和 Final Answer；需要工具时只输出 Action，已有答案时只输出 Final Answer
+- Final Answer 使用纯文本格式：Final Answer: 你的完整答复
 - 回答使用中文，简洁专业
 """
 
 _QUERY_NORMALIZATION_RULES: tuple[tuple[str, str], ...] = (
     ("优惠卷", "优惠券"),
+)
+_FINAL_ANSWER_KEYS = ("Final Answer", "final_answer", "finalAnswer")
+_THOUGHT_KEYS = ("Thought", "thought")
+_TEXT_FINAL_ANSWER_RE = re.compile(
+    r"(?:^|\n)\s*Final Answer\s*[:：]\s*(?P<answer>.+)",
+    re.IGNORECASE | re.DOTALL,
+)
+_JSON_FINAL_ANSWER_RE = re.compile(
+    r'["\'](?:Final Answer|final_answer|finalAnswer)["\']\s*:\s*"(?P<answer>(?:\\.|[^"\\])*)"',
+    re.DOTALL,
 )
 
 
@@ -193,6 +205,8 @@ class ReActProcessorAgent:
         ]
 
         # ReAct loop
+        no_action_count = 0
+        last_no_action_signature = ""
         for iteration in range(self._max_iterations):
             logger.info(f"[ReAct] Iteration {iteration + 1}/{self._max_iterations}")
 
@@ -217,42 +231,14 @@ class ReActProcessorAgent:
                 raw = response.choices[0].message.content or ""
                 logger.info(f"[ReAct] LLM response: {raw[:200]}...")
 
-                # Check for Final Answer
-                if "Final Answer:" in raw:
-                    answer = raw.split("Final Answer:")[-1].strip()
-                    thought = self._extract_thought(raw)
-
-                    # Record in memory
-                    if memory:
-                        memory.add_thought(f"Completed in {iteration + 1} iterations", iteration)
-
-                    iter_span.set_output({
-                        "thought": thought,
-                        "raw_response": raw,
-                        "final_answer": answer,
-                        "iterations": iteration + 1,
-                    })
-                    return {
-                        "result": answer,
-                        "references": references,
-                    }
-
                 parsed_json: dict[str, Any] | None = None
 
                 # Try to parse JSON/markdown-code-block result (backward compat)
                 try:
-                    parsed_json = parse_json_response(raw)
-                    final_answer = self._extract_json_final_answer(parsed_json)
-                    if final_answer:
-                        iter_span.set_output({
-                            "raw_response": raw,
-                            "json_final_answer": final_answer,
-                        })
-                        return {
-                            "result": final_answer,
-                            "references": references,
-                        }
-                    if "result" in parsed_json:
+                    parsed = parse_json_response(raw)
+                    if isinstance(parsed, dict):
+                        parsed_json = parsed
+                    if parsed_json and "result" in parsed_json:
                         iter_span.set_output({
                             "raw_response": raw,
                             "json_result": parsed_json.get("result", ""),
@@ -268,6 +254,24 @@ class ReActProcessorAgent:
                 except json.JSONDecodeError:
                     pass
 
+                final_answer = self._extract_final_answer(raw, parsed_json)
+                if final_answer:
+                    thought = self._extract_thought(raw, parsed_json)
+
+                    if memory:
+                        memory.add_thought(f"Completed in {iteration + 1} iterations", iteration)
+
+                    iter_span.set_output({
+                        "thought": thought,
+                        "raw_response": raw,
+                        "final_answer": final_answer,
+                        "iterations": iteration + 1,
+                    })
+                    return {
+                        "result": final_answer,
+                        "references": references,
+                    }
+
                 # Parse Thought and Action
                 thought = self._extract_thought(raw, parsed_json)
                 action = self._extract_action(raw, parsed_json)
@@ -276,6 +280,8 @@ class ReActProcessorAgent:
                     memory.add_thought(thought or f"Iteration {iteration + 1}", iteration)
 
                 if action:
+                    no_action_count = 0
+                    last_no_action_signature = ""
                     tool_name = action.get("tool", "")
                     params = action.get("params", {})
                     observation = ""
@@ -310,7 +316,34 @@ class ReActProcessorAgent:
                         "raw_response": raw,
                     })
                 else:
-                    # No action found, just add response and continue
+                    no_action_count += 1
+                    signature = self._response_signature(raw)
+                    is_repeated = bool(signature and signature == last_no_action_signature)
+                    last_no_action_signature = signature
+
+                    if no_action_count >= 2 or is_repeated:
+                        answer = self._build_convergence_answer(
+                            category,
+                            priority,
+                            references,
+                            thought,
+                        )
+                        iter_span.set_output({
+                            "thought": thought,
+                            "raw_response": raw,
+                            "observation": "连续未识别到工具调用或最终答案，已触发收敛兜底。",
+                            "final_answer": answer,
+                            "iterations": iteration + 1,
+                            "converged": True,
+                        })
+                        logger.warning(
+                            f"[ReAct] Converged after {iteration + 1} no-action iterations"
+                        )
+                        return {
+                            "result": answer,
+                            "references": references,
+                        }
+
                     messages.append({"role": "assistant", "content": raw})
                     messages.append({
                         "role": "user",
@@ -389,23 +422,114 @@ class ReActProcessorAgent:
                     seen.add(value)
         return merged
 
+    def _extract_final_answer(self, text: str, parsed: dict[str, Any] | None = None) -> str:
+        """从严格 JSON、半结构化 JSON 或 ReAct 文本中提取最终答案。"""
+        if parsed:
+            final_answer = self._extract_json_final_answer(parsed)
+            if final_answer:
+                return final_answer
+
+        json_like_match = _JSON_FINAL_ANSWER_RE.search(text)
+        if json_like_match:
+            return self._decode_json_string_value(json_like_match.group("answer"))
+
+        text_match = _TEXT_FINAL_ANSWER_RE.search(text)
+        if text_match:
+            return text_match.group("answer").strip().strip('"\'')
+
+        return ""
+
     def _extract_json_final_answer(self, parsed: dict[str, Any]) -> str:
         """兼容模型把 ReAct 结果包进 JSON 字段的情况。"""
-        for key in ("Final Answer", "final_answer", "finalAnswer"):
+        for key in _FINAL_ANSWER_KEYS:
             value = parsed.get(key)
             if isinstance(value, str) and value.strip():
                 return value.strip()
         return ""
 
+    def _decode_json_string_value(self, value: str) -> str:
+        """解码从半结构化 JSON 字段中截取的字符串值。"""
+        try:
+            decoded = json.loads(f'"{value}"')
+        except json.JSONDecodeError:
+            decoded = (
+                value.replace(r"\\", "\\")
+                .replace(r"\"", '"')
+                .replace(r"\n", "\n")
+                .replace(r"\t", "\t")
+            )
+        return str(decoded).strip()
+
     def _extract_thought(self, text: str, parsed: dict[str, Any] | None = None) -> str:
         """从响应中提取 Thought。"""
         if parsed:
-            for key in ("Thought", "thought"):
+            for key in _THOUGHT_KEYS:
                 value = parsed.get(key)
                 if isinstance(value, str) and value.strip():
                     return value.strip()
+        thought = self._extract_json_string_field(text, _THOUGHT_KEYS)
+        if thought:
+            return thought
         match = re.search(r"Thought:\s*(.+?)(?=\nAction:|\nFinal Answer:|$)", text, re.DOTALL)
         return match.group(1).strip() if match else ""
+
+    def _extract_json_string_field(self, text: str, keys: tuple[str, ...]) -> str:
+        """从非严格 JSON 文本中提取简单字符串字段。"""
+        key_pattern = "|".join(re.escape(key) for key in keys)
+        match = re.search(
+            rf'["\'](?:{key_pattern})["\']\s*:\s*"(?P<value>(?:\\.|[^"\\])*)"',
+            text,
+            re.DOTALL,
+        )
+        if not match:
+            return ""
+        return self._decode_json_string_value(match.group("value"))
+
+    def _response_signature(self, text: str) -> str:
+        """生成响应签名，用于识别重复空转。"""
+        normalized = re.sub(r"\s+", "", text)
+        return normalized[:500]
+
+    def _build_convergence_answer(
+        self,
+        category: str,
+        priority: str,
+        references: list[str],
+        thought: str,
+    ) -> str:
+        """连续无动作时基于已有上下文生成兜底答复，避免 ReAct 空转。"""
+        valid_references = [
+            reference for reference in references
+            if reference and "未检索到相关知识片段" not in reference
+        ]
+        if valid_references:
+            reference_text = self._compact_reference(valid_references[0])
+            return (
+                "您好，已根据知识库中与该问题相关的信息整理如下：\n\n"
+                f"{reference_text}\n\n"
+                "建议您优先按上述内容核对适用条件、操作步骤和限制说明；"
+                "如仍无法解决，请补充具体对象、操作路径和异常截图，方便继续核查。"
+            )
+
+        if thought:
+            return (
+                "您好，已收到您的工单。系统已完成初步分析："
+                f"{thought}\n\n"
+                "请补充具体操作路径、异常截图或相关账号信息，便于继续定位处理。"
+            )
+
+        return (
+            "您好，已收到您的工单。"
+            f"当前分类为 {category}，优先级为 {priority}。"
+            "请补充具体现象、操作路径和截图，我们会据此继续核查处理。"
+        )
+
+    def _compact_reference(self, reference: str, max_length: int = 800) -> str:
+        """压缩知识库引用，避免把过长检索上下文原样塞进答复。"""
+        compacted = re.sub(r"\s+", " ", reference).strip()
+        if len(compacted) <= max_length:
+            return compacted
+        return f"{compacted[:max_length].rstrip()}..."
 
     def _extract_action(
         self,
@@ -536,6 +660,7 @@ class ReActProcessorAgent:
             knowledge_tool=knowledge_tool,
             api_key=settings.llm_api_key,
             base_url=settings.llm_base_url,
+            max_iterations=settings.max_react_iterations,
         )
 
 

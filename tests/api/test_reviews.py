@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from src.multi_agent_system.api.routes import router
 from src.multi_agent_system.core.database import DatabaseManager
+from src.multi_agent_system.core.trace import TraceManager
 from tests.conftest import TEST_DATABASE_URL
 
 
@@ -128,6 +129,161 @@ def test_list_review_queue_empty(client: TestClient) -> None:
     body = resp.json()
     assert body["queue"] == []
     assert body["total"] == 0
+
+
+def test_request_info_decision_pauses_for_user_input(
+    client: TestClient,
+    app: FastAPI,
+) -> None:
+    """审核员可请求用户补充信息，工单进入待用户补充状态。"""
+    _seed_ticket(app, "TK-info-1", content="退款还没有到账")
+    _seed_review(
+        app,
+        "HR-info-1",
+        "TK-info-1",
+        trigger_type="review_failed",
+        trigger_reason="缺少订单号",
+    )
+
+    resp = client.post(
+        "/api/reviews/TK-info-1/decision",
+        json={
+            "decision": "request_info",
+            "decision_reason": "请补充订单号",
+            "reviewer_id": "reviewer-001",
+        },
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["next_node"] == "waiting_user_input"
+    assert body["workflow_resumed"] is False
+
+    ticket = _run(client, app.state.db_manager.get_ticket, "TK-info-1")
+    assert ticket["status"] == "waiting_user_input"
+
+    reviews = _run(client, app.state.db_manager.list_reviews_by_ticket, "TK-info-1")
+    assert reviews[-1]["decision"] == "request_info"
+    assert reviews[-1]["status"] == "decided"
+
+    messages = _run(client, app.state.db_manager.list_ticket_messages, "TK-info-1")
+    assert messages[-1]["sender_type"] == "reviewer"
+    assert messages[-1]["content"] == "请补充订单号"
+
+
+def test_request_info_records_trace_span(
+    client: TestClient,
+    app: FastAPI,
+) -> None:
+    """人工请求补充信息应进入原 trace。"""
+    _seed_ticket(app, "TK-info-trace", content="退款还没有到账")
+    _seed_review(
+        app,
+        "HR-info-trace",
+        "TK-info-trace",
+        trigger_type="review_failed",
+        trigger_reason="缺少订单号",
+    )
+    app.state.trace_manager = TraceManager(app.state.db_manager)
+    trace_id = _run(client, app.state.trace_manager.start_trace, "TK-info-trace")
+    _run(client, app.state.trace_manager.finish_trace, trace_id, "completed")
+
+    resp = client.post(
+        "/api/reviews/TK-info-trace/decision",
+        json={
+            "decision": "request_info",
+            "decision_reason": "请补充订单号",
+            "reviewer_id": "reviewer-001",
+        },
+    )
+
+    assert resp.status_code == 200
+    spans = _run(client, app.state.db_manager.get_spans_by_trace, trace_id)
+    names = [span["name"] for span in spans]
+    assert "user_input_requested" in names
+
+
+def test_user_message_requires_waiting_state(
+    client: TestClient,
+    app: FastAPI,
+) -> None:
+    """已完成工单不允许追加补充消息。"""
+    _seed_ticket(app, "TK-msg-state", status="completed")
+
+    resp = client.post(
+        "/api/tickets/TK-msg-state/messages",
+        json={"content": "订单号是 123456", "sender_id": "user-001"},
+    )
+
+    assert resp.status_code == 409
+
+
+def test_user_message_resumes_workflow(
+    client: TestClient,
+    app: FastAPI,
+) -> None:
+    """用户在待补充状态追加消息后触发恢复处理。"""
+    _seed_ticket(app, "TK-user-1", content="退款没有到账", status="waiting_user_input")
+
+    with patch(
+        "src.multi_agent_system.api.routes.resume_from_user_input",
+        new_callable=AsyncMock,
+    ) as mock_resume:
+        mock_resume.return_value = {
+            "status": "ok",
+            "ticket_id": "TK-user-1",
+            "workflow_resumed": True,
+            "next_node": "process",
+        }
+        resp = client.post(
+            "/api/tickets/TK-user-1/messages",
+            json={"content": "订单号是 123456", "sender_id": "user-001"},
+        )
+
+    assert resp.status_code == 200
+    assert resp.json()["workflow_resumed"] is True
+    mock_resume.assert_awaited_once()
+
+    messages = _run(client, app.state.db_manager.list_ticket_messages, "TK-user-1")
+    assert messages[-1]["sender_type"] == "user"
+    assert messages[-1]["content"] == "订单号是 123456"
+
+
+def test_user_message_records_trace_span(
+    client: TestClient,
+    app: FastAPI,
+) -> None:
+    """用户补充消息应作为业务事件写入原 trace。"""
+    _seed_ticket(
+        app,
+        "TK-user-trace-api",
+        content="退款没有到账",
+        status="waiting_user_input",
+    )
+    app.state.trace_manager = TraceManager(app.state.db_manager)
+    trace_id = _run(client, app.state.trace_manager.start_trace, "TK-user-trace-api")
+    _run(client, app.state.trace_manager.finish_trace, trace_id, "completed")
+
+    with patch(
+        "src.multi_agent_system.api.routes.resume_from_user_input",
+        new_callable=AsyncMock,
+    ) as mock_resume:
+        mock_resume.return_value = {
+            "status": "ok",
+            "ticket_id": "TK-user-trace-api",
+            "workflow_resumed": True,
+            "next_node": "process",
+        }
+        resp = client.post(
+            "/api/tickets/TK-user-trace-api/messages",
+            json={"content": "订单号是 123456", "sender_id": "user-001"},
+        )
+
+    assert resp.status_code == 200
+    mock_resume.assert_awaited_once()
+    spans = _run(client, app.state.db_manager.get_spans_by_trace, trace_id)
+    names = [span["name"] for span in spans]
+    assert "ticket_message_created" in names
 
 
 def test_list_review_queue_returns_pending(app: FastAPI, client: TestClient) -> None:

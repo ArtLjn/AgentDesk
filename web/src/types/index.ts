@@ -14,13 +14,28 @@ export interface Ticket {
   created_at: string
 }
 
-export type TicketStatus = 'received' | 'classifying' | 'processing' | 'reviewing' | 'pending_human_review' | 'completed' | 'failed'
+export type TicketStatus = 'received' | 'classifying' | 'processing' | 'reviewing' | 'pending_human_review' | 'waiting_user_input' | 'completed' | 'failed'
 export type TicketCategory = 'technical' | 'billing' | 'complaint' | 'inquiry'
 export type TicketPriority = 'P0' | 'P1' | 'P2' | 'P3'
 
 export interface TicketCreateRequest {
   content: string
   user_id?: string
+}
+
+export interface TicketMessage {
+  message_id: string
+  ticket_id: string
+  sender_type: 'user' | 'reviewer' | 'system' | 'agent' | string
+  sender_id: string | null
+  content: string
+  metadata: Record<string, unknown>
+  created_at: string
+}
+
+export interface TicketMessageCreateRequest {
+  content: string
+  sender_id?: string
 }
 
 // Trace 相关
@@ -243,7 +258,7 @@ export interface WSMessage {
 
 // 人工审核相关
 export type TriggerType = 'escalate' | 'review_failed' | 'error_fallback' | 'user_request'
-export type ReviewDecision = 'approve' | 'reject' | 'rewrite' | 'reprocess'
+export type ReviewDecision = 'approve' | 'reject' | 'rewrite' | 'reprocess' | 'request_info'
 export type ReviewStatus = 'pending' | 'decided'
 
 export interface AISuggestion {

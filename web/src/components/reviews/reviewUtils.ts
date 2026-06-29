@@ -10,6 +10,7 @@ export const decisionMeta: Record<ReviewDecision, DecisionMeta> = {
   approve: { label: '通过', color: 'bg-success text-success-foreground', ring: 'ring-success/30' },
   rewrite: { label: '改写', color: 'bg-primary text-primary-foreground', ring: 'ring-primary/30' },
   reprocess: { label: '重处理', color: 'bg-warning text-warning-foreground', ring: 'ring-warning/30' },
+  request_info: { label: '请求补充', color: 'bg-primary text-primary-foreground', ring: 'ring-primary/30' },
   reject: { label: '驳回', color: 'bg-destructive text-destructive-foreground', ring: 'ring-destructive/30' },
 }
 

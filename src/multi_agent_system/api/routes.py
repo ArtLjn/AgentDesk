@@ -9,6 +9,8 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from loguru import logger
 
+from src.multi_agent_system.core.logging import generate_trace_id
+from src.multi_agent_system.models.message import TicketMessageCreate
 from src.multi_agent_system.models.ticket import (
     BatchTicketCreate,
     TicketCreate,
@@ -16,7 +18,10 @@ from src.multi_agent_system.models.ticket import (
 )
 from src.multi_agent_system.agents.ticket_intent import TicketIntentAgent
 from src.multi_agent_system.models.review import ReviewDecisionRequest
-from src.multi_agent_system.workflow.graph import create_initial_state
+from src.multi_agent_system.workflow.graph import (
+    create_initial_state,
+    resume_from_user_input,
+)
 
 __all__ = ["router"]
 
@@ -189,6 +194,75 @@ async def get_ticket(ticket_id: str, request: Request) -> TicketResponse:
         error=ticket.get("error"),
         created_at=ticket.get("created_at", datetime.now()),
     )
+
+
+@router.get("/tickets/{ticket_id}/messages", response_model=list[dict])
+async def list_ticket_messages(ticket_id: str, request: Request) -> list[dict]:
+    """获取工单沟通记录。"""
+    ticket = await request.app.state.db_manager.get_ticket(ticket_id)
+    if ticket is None:
+        raise HTTPException(status_code=404, detail=f"工单 {ticket_id} 不存在")
+    return await request.app.state.db_manager.list_ticket_messages(ticket_id)
+
+
+@router.post("/tickets/{ticket_id}/messages", response_model=dict)
+async def create_user_ticket_message(
+    ticket_id: str,
+    body: TicketMessageCreate,
+    request: Request,
+) -> dict:
+    """用户补充工单信息，并恢复后续处理。"""
+    ticket = await request.app.state.db_manager.get_ticket(ticket_id)
+    if ticket is None:
+        raise HTTPException(status_code=404, detail=f"工单 {ticket_id} 不存在")
+    if ticket.get("status") != "waiting_user_input":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"工单 {ticket_id} 当前不等待用户补充"
+                f"（当前状态: {ticket.get('status')}）"
+            ),
+        )
+
+    message_id = f"TM-{generate_trace_id()}"
+    await request.app.state.db_manager.create_ticket_message({
+        "message_id": message_id,
+        "ticket_id": ticket_id,
+        "sender_type": "user",
+        "sender_id": body.sender_id,
+        "content": body.content,
+        "metadata": {"source": "user_input"},
+    })
+    trace_manager = getattr(request.app.state, "trace_manager", None)
+    trace = await request.app.state.db_manager.get_trace_by_ticket(ticket_id)
+    if trace_manager is not None and trace and trace.get("trace_id"):
+        async with trace_manager.start_span(
+            "ticket_message_created",
+            "node",
+            trace_id=trace["trace_id"],
+            input_data={
+                "ticket_id": ticket_id,
+                "sender_type": "user",
+                "content_length": len(body.content),
+            },
+        ) as span:
+            span.set_output({"message_id": message_id})
+
+    await _broadcast_ticket_update(
+        ticket_id=ticket_id,
+        status="waiting_user_input",
+        message="用户已补充信息",
+        node="ticket_message_created",
+    )
+
+    result = await resume_from_user_input(request.app, ticket_id)
+    await _broadcast_ticket_update(
+        ticket_id=ticket_id,
+        status="processing",
+        message="已收到补充信息，继续处理",
+        node="workflow_resumed_from_user_input",
+    )
+    return result
 
 
 @router.get("/tickets", response_model=list[TicketResponse])
@@ -569,7 +643,10 @@ async def submit_review_decision(
     request: Request,
 ) -> dict:
     """提交人工审核决策，恢复工作流执行。"""
-    from src.multi_agent_system.workflow.graph import resume_from_human_decision
+    from src.multi_agent_system.workflow.graph import (
+        pause_for_user_input,
+        resume_from_human_decision,
+    )
 
     app = request.app
     db_tool = app.state.db_tool
@@ -598,6 +675,30 @@ async def submit_review_decision(
             status_code=409,
             detail=f"工单 {ticket_id} 的审核单已决策，请勿重复提交",
         )
+
+    if req.decision.value == "request_info":
+        result = await pause_for_user_input(
+            app=app,
+            ticket_id=ticket_id,
+            decision_reason=req.decision_reason,
+            reviewer_id=req.reviewer_id,
+        )
+        await _broadcast_review_event(
+            "user_input_requested",
+            ticket_id,
+            {
+                "reviewer_id": req.reviewer_id,
+                "message": req.decision_reason,
+            },
+        )
+        await _broadcast_ticket_update(
+            ticket_id=ticket_id,
+            status="waiting_user_input",
+            message=req.decision_reason,
+            node="request_info",
+            data={"reviewer_id": req.reviewer_id},
+        )
+        return result
 
     # 6. 恢复工作流
     result = await resume_from_human_decision(

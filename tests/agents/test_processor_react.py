@@ -294,3 +294,65 @@ async def test_react_processor_extracts_final_answer_from_json_like_text(mock_cl
 
     assert result["result"].startswith("**处理建议**")
     assert mock_client.chat_completions_create.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_react_processor_extracts_final_answer_from_broken_json_like_text(mock_client):
+    """模型输出非严格 JSON 但包含 Final Answer 时，不应继续空转。"""
+    agent = ReActProcessorAgent(
+        model="test-model",
+        client=mock_client,
+    )
+    mock_client.chat_completions_create = AsyncMock(
+        return_value=MagicMock(
+            choices=[
+                MagicMock(
+                    message=MagicMock(
+                        content=(
+                            '{\n'
+                            '  "Thought": "已有知识库上下文，可以直接答复",\n'
+                            '  "Observation": "{"broken": "nested"}",\n'
+                            '  "Final Answer": "您好，请通过 security@company.com 上报，禁止未经授权攻击。"\n'
+                            '}'
+                        )
+                    )
+                )
+            ]
+        )
+    )
+
+    result = await agent.process("我要攻击你们系统了", "inquiry", "P3")
+
+    assert result["result"].startswith("您好，请通过 security@company.com")
+    assert mock_client.chat_completions_create.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_react_processor_stops_after_repeated_no_action_responses(mock_client):
+    """连续无工具、无最终答案的重复响应应快速收敛，避免跑满 ReAct 轮次。"""
+    tool = MockSearchTool()
+    registry = ToolRegistry()
+    registry.register(tool)
+    agent = ReActProcessorAgent(
+        model="test-model",
+        tool_registry=registry,
+        client=mock_client,
+        max_iterations=10,
+    )
+    mock_client.chat_completions_create = AsyncMock(
+        return_value=MagicMock(
+            choices=[
+                MagicMock(
+                    message=MagicMock(
+                        content='{"Thought": "已有知识库上下文，建议按平台能力说明答复。"}'
+                    )
+                )
+            ]
+        )
+    )
+
+    result = await agent.process("平台提供哪些能力", "inquiry", "P3")
+
+    assert "问题较复杂" not in result["result"]
+    assert "Knowledge about 平台提供哪些能力" in result["result"]
+    assert mock_client.chat_completions_create.call_count <= 2

@@ -1,0 +1,448 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AgentDesk 智能工单处理流程图</title>
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: #eef3f8;
+      font-family: "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif;
+      color: #162033;
+    }
+
+    .canvas {
+      position: relative;
+      width: 2400px;
+      height: 1350px;
+      overflow: hidden;
+      background:
+        radial-gradient(circle at 15% 18%, rgba(47, 129, 247, 0.12), transparent 28%),
+        radial-gradient(circle at 88% 10%, rgba(6, 182, 212, 0.12), transparent 24%),
+        linear-gradient(135deg, #f8fbff 0%, #edf3f9 48%, #f7fbfc 100%);
+    }
+
+    .title {
+      position: absolute;
+      left: 0;
+      right: 0;
+      top: 38px;
+      text-align: center;
+      font-size: 44px;
+      font-weight: 800;
+      letter-spacing: 0;
+      color: #102033;
+    }
+
+    .subtitle {
+      position: absolute;
+      left: 0;
+      right: 0;
+      top: 96px;
+      text-align: center;
+      font-size: 20px;
+      font-weight: 500;
+      color: #607086;
+    }
+
+    .system-box {
+      position: absolute;
+      left: 165px;
+      top: 150px;
+      width: 2070px;
+      height: 1030px;
+      border: 2px dashed #8fa3b8;
+      border-radius: 26px;
+      background: rgba(255, 255, 255, 0.58);
+      box-shadow: 0 22px 70px rgba(26, 50, 78, 0.12);
+    }
+
+    .system-label {
+      position: absolute;
+      left: 190px;
+      top: 126px;
+      padding: 8px 18px;
+      border-radius: 999px;
+      background: #102033;
+      color: #ffffff;
+      font-size: 20px;
+      font-weight: 700;
+    }
+
+    .lane {
+      position: absolute;
+      border: 1px solid rgba(113, 132, 153, 0.35);
+      border-radius: 18px;
+      background: rgba(255, 255, 255, 0.72);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.9);
+    }
+
+    .lane h2 {
+      margin: 0;
+      padding: 14px 20px 10px;
+      font-size: 22px;
+      line-height: 1.2;
+      font-weight: 800;
+      color: #203047;
+    }
+
+    .lane .hint {
+      position: absolute;
+      right: 18px;
+      top: 14px;
+      font-size: 15px;
+      font-weight: 700;
+      color: #728198;
+    }
+
+    .user-lane { left: 205px; top: 210px; width: 410px; height: 890px; background: #f5f0ff; }
+    .api-lane { left: 655px; top: 210px; width: 410px; height: 890px; background: #eff8ff; }
+    .graph-lane { left: 1105px; top: 210px; width: 690px; height: 890px; background: #f1fbf5; }
+    .review-lane { left: 1835px; top: 210px; width: 360px; height: 890px; background: #fff7ed; }
+
+    .data-band {
+      position: absolute;
+      left: 205px;
+      top: 1120px;
+      width: 1990px;
+      height: 150px;
+      border: 1px solid rgba(113, 132, 153, 0.35);
+      border-radius: 20px;
+      background: rgba(236, 244, 255, 0.9);
+    }
+
+    .data-band h2 {
+      margin: 0;
+      padding: 14px 18px 0;
+      font-size: 22px;
+      font-weight: 800;
+    }
+
+    .node {
+      position: absolute;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      min-height: 76px;
+      padding: 13px 16px;
+      border: 2px solid #274c77;
+      border-radius: 14px;
+      background: #ffffff;
+      box-shadow: 0 10px 24px rgba(27, 45, 70, 0.10);
+      text-align: center;
+      font-weight: 700;
+      line-height: 1.28;
+    }
+
+    .node .main {
+      font-size: 19px;
+      color: #172034;
+    }
+
+    .node .sub {
+      margin-top: 4px;
+      font-size: 14px;
+      color: #5d6b7f;
+      font-weight: 600;
+    }
+
+    .node.small .main {
+      font-size: 17px;
+    }
+
+    .node.small .sub {
+      font-size: 12px;
+    }
+
+    .node.purple { border-color: #7c3aed; background: #fbf8ff; }
+    .node.blue { border-color: #2f81f7; background: #f6fbff; }
+    .node.green { border-color: #16a34a; background: #f7fff9; }
+    .node.orange { border-color: #ea580c; background: #fffaf5; }
+    .node.red { border-color: #dc2626; background: #fff7f7; }
+    .node.gray { border-color: #64748b; background: #f8fafc; }
+
+    .decision {
+      position: absolute;
+      width: 140px;
+      height: 140px;
+      transform: rotate(45deg);
+      border: 2px solid #274c77;
+      border-radius: 16px;
+      background: #fff;
+      box-shadow: 0 10px 24px rgba(27, 45, 70, 0.10);
+    }
+
+    .decision .inner {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 14px;
+      transform: rotate(-45deg);
+      text-align: center;
+      font-size: 17px;
+      font-weight: 800;
+      line-height: 1.22;
+      color: #172034;
+    }
+
+    .tag {
+      position: absolute;
+      z-index: 4;
+      padding: 5px 10px;
+      border-radius: 999px;
+      background: #102033;
+      color: #fff;
+      font-size: 13px;
+      font-weight: 800;
+      white-space: nowrap;
+      box-shadow: 0 6px 14px rgba(16, 32, 51, 0.18);
+    }
+
+    .pill {
+      position: absolute;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 42px;
+      padding: 0 16px;
+      border-radius: 999px;
+      border: 1px solid rgba(39, 76, 119, 0.45);
+      background: #ffffff;
+      font-size: 15px;
+      font-weight: 800;
+      color: #223047;
+      box-shadow: 0 8px 18px rgba(27, 45, 70, 0.08);
+      white-space: nowrap;
+    }
+
+    .legend {
+      position: absolute;
+      right: 218px;
+      top: 126px;
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      font-size: 15px;
+      color: #607086;
+      font-weight: 700;
+    }
+
+    .legend span {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+    }
+
+    .dot {
+      width: 11px;
+      height: 11px;
+      border-radius: 50%;
+      display: inline-block;
+    }
+
+    svg {
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: 2400px;
+      height: 1350px;
+      pointer-events: none;
+      overflow: visible;
+    }
+
+    .arrow {
+      fill: none;
+      stroke: #28506f;
+      stroke-width: 3;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      marker-end: url(#arrow);
+    }
+
+    .arrow.secondary {
+      stroke: #64748b;
+      stroke-dasharray: 9 8;
+      marker-end: url(#arrowSecondary);
+    }
+
+    .arrow.highlight {
+      stroke: #0ea5a5;
+      stroke-width: 4;
+      marker-end: url(#arrowHighlight);
+    }
+  </style>
+</head>
+<body>
+  <div class="canvas">
+    <div class="title">AgentDesk 智能工单处理系统实现逻辑流程图</div>
+    <div class="subtitle">AI 处理主链路 · 人工审核闭环 · 用户二次补充恢复 · Trace 全程可观测</div>
+    <div class="system-box"></div>
+    <div class="system-label">AI Agent Ticket System</div>
+    <div class="legend">
+      <span><i class="dot" style="background:#2f81f7"></i>接口调用</span>
+      <span><i class="dot" style="background:#16a34a"></i>自动处理</span>
+      <span><i class="dot" style="background:#ea580c"></i>人工介入</span>
+      <span><i class="dot" style="background:#0ea5a5"></i>用户补充恢复</span>
+    </div>
+
+    <div class="lane user-lane"><h2>用户与前端层</h2><div class="hint">React SPA</div></div>
+    <div class="lane api-lane"><h2>接口与事件层</h2><div class="hint">FastAPI</div></div>
+    <div class="lane graph-lane"><h2>LangGraph 主流程</h2><div class="hint">多 Agent 编排</div></div>
+    <div class="lane review-lane"><h2>人工审核与补充</h2><div class="hint">Human in Loop</div></div>
+    <div class="data-band"><h2>数据、知识与可观测底座</h2></div>
+
+    <div class="node purple" style="left:250px;top:300px;width:280px;">
+      <div class="main">用户提交工单</div>
+      <div class="sub">自然语言描述 / user_id</div>
+    </div>
+    <div class="node purple" style="left:250px;top:500px;width:280px;">
+      <div class="main">工单详情页</div>
+      <div class="sub">查看状态、结果、Trace</div>
+    </div>
+    <div class="node purple" style="left:250px;top:715px;width:280px;">
+      <div class="main">补充信息输入框</div>
+      <div class="sub">仅 waiting_user_input 显示</div>
+    </div>
+    <div class="node purple small" style="left:250px;top:910px;width:280px;">
+      <div class="main">用户反馈不满意</div>
+      <div class="sub">completed + satisfied=false</div>
+    </div>
+
+    <div class="node blue" style="left:710px;top:255px;width:300px;">
+      <div class="main">POST /api/tickets</div>
+      <div class="sub">创建工单并后台执行</div>
+    </div>
+    <div class="node blue" style="left:710px;top:405px;width:300px;">
+      <div class="main">TicketIntentAgent</div>
+      <div class="sub">标题 / 分类 / 风险 / 缺失字段</div>
+    </div>
+    <div class="node blue" style="left:710px;top:555px;width:300px;">
+      <div class="main">写入 tickets</div>
+      <div class="sub">status=received，创建 trace</div>
+    </div>
+    <div class="node blue" style="left:710px;top:720px;width:300px;">
+      <div class="main">POST /tickets/{id}/messages</div>
+      <div class="sub">用户补充消息接口</div>
+    </div>
+    <div class="node blue small" style="left:710px;top:910px;width:300px;">
+      <div class="main">WebSocket 推送</div>
+      <div class="sub">ticket_update / review_event</div>
+    </div>
+
+    <div class="node green small" style="left:1160px;top:255px;width:210px;">
+      <div class="main">receive</div>
+      <div class="sub">初始化状态</div>
+    </div>
+    <div class="node green small" style="left:1435px;top:255px;width:210px;">
+      <div class="main">classify</div>
+      <div class="sub">分类 / 优先级</div>
+    </div>
+    <div class="decision" style="left:1325px;top:405px;"><div class="inner">route<br>路由判断</div></div>
+    <div class="node green" style="left:1160px;top:610px;width:240px;">
+      <div class="main">process</div>
+      <div class="sub">RAG 检索 / 工具调用 / 生成</div>
+    </div>
+    <div class="node green" style="left:1530px;top:610px;width:220px;">
+      <div class="main">review</div>
+      <div class="sub">ReviewerAgent 评分</div>
+    </div>
+    <div class="decision" style="left:1395px;top:765px;"><div class="inner">评分达标？</div></div>
+    <div class="node green small" style="left:1160px;top:890px;width:210px;">
+      <div class="main">retry_check</div>
+      <div class="sub">未超限返回处理</div>
+    </div>
+    <div class="node green small" style="left:1530px;top:930px;width:220px;">
+      <div class="main">notify → complete</div>
+      <div class="sub">通知并归档 completed</div>
+    </div>
+
+    <div class="node orange" style="left:1880px;top:275px;width:260px;">
+      <div class="main">human_review_wait</div>
+      <div class="sub">生成 pending 审核单</div>
+    </div>
+    <div class="node orange" style="left:1880px;top:430px;width:260px;">
+      <div class="main">审核工作台</div>
+      <div class="sub">AI 建议 + 人工决策</div>
+    </div>
+    <div class="node orange small" style="left:1880px;top:590px;width:260px;">
+      <div class="main">通过 / 改写 / 重处理 / 驳回</div>
+      <div class="sub">approve / rewrite / reprocess / reject</div>
+    </div>
+    <div class="node orange" style="left:1880px;top:750px;width:260px;">
+      <div class="main">请求用户补充</div>
+      <div class="sub">decision=request_info</div>
+    </div>
+    <div class="node orange small" style="left:1880px;top:905px;width:260px;">
+      <div class="main">waiting_user_input</div>
+      <div class="sub">工单暂停等待用户</div>
+    </div>
+
+    <div class="pill" style="left:300px;top:1182px;width:230px;">MySQL：tickets</div>
+    <div class="pill" style="left:560px;top:1182px;width:300px;">human_reviews：审核记录</div>
+    <div class="pill" style="left:890px;top:1182px;width:320px;">ticket_messages：补充沟通</div>
+    <div class="pill" style="left:1240px;top:1182px;width:260px;">traces / spans</div>
+    <div class="pill" style="left:1530px;top:1182px;width:260px;">Qdrant 知识库</div>
+    <div class="pill" style="left:1820px;top:1182px;width:260px;">LLM / Embedding</div>
+
+    <div class="tag" style="left:1218px;top:515px;">普通工单</div>
+    <div class="tag" style="left:1630px;top:455px;">投诉 / P0 / 高风险 / 缺字段</div>
+    <div class="tag" style="left:1748px;top:690px;">重试超限</div>
+    <div class="tag" style="left:1598px;top:832px;">通过</div>
+    <div class="tag" style="left:1200px;top:820px;">不通过</div>
+    <div class="tag" style="left:1660px;top:1148px;">Trace 贯穿全链路</div>
+
+    <svg viewBox="0 0 2400 1350" aria-hidden="true">
+      <defs>
+        <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+          <path d="M1,1 L11,6 L1,11 Z" fill="#28506f"></path>
+        </marker>
+        <marker id="arrowSecondary" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+          <path d="M1,1 L11,6 L1,11 Z" fill="#64748b"></path>
+        </marker>
+        <marker id="arrowHighlight" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+          <path d="M1,1 L11,6 L1,11 Z" fill="#0ea5a5"></path>
+        </marker>
+      </defs>
+
+      <path class="arrow" d="M530 338 C600 338, 640 294, 710 294"></path>
+      <path class="arrow" d="M860 331 L860 405"></path>
+      <path class="arrow" d="M860 481 L860 555"></path>
+      <path class="arrow" d="M1010 595 C1080 595, 1100 294, 1160 294"></path>
+      <path class="arrow" d="M1370 294 L1435 294"></path>
+      <path class="arrow" d="M1540 331 C1540 368, 1465 386, 1414 423"></path>
+      <path class="arrow" d="M1388 545 C1340 580, 1280 610, 1280 610"></path>
+      <path class="arrow" d="M1400 475 C1540 455, 1710 320, 1880 320"></path>
+      <path class="arrow" d="M1400 687 L1530 650"></path>
+      <path class="arrow" d="M1750 655 C1810 650, 1830 520, 1880 520"></path>
+      <path class="arrow" d="M1640 686 C1660 725, 1530 755, 1480 783"></path>
+      <path class="arrow" d="M1455 905 C1400 925, 1360 929, 1370 929"></path>
+      <path class="arrow" d="M1370 930 C1300 850, 1240 760, 1250 686"></path>
+      <path class="arrow" d="M1532 835 C1610 870, 1640 912, 1640 930"></path>
+      <path class="arrow" d="M2010 351 L2010 430"></path>
+      <path class="arrow" d="M2010 506 L2010 590"></path>
+      <path class="arrow" d="M1880 632 C1815 650, 1800 930, 1750 970"></path>
+      <path class="arrow" d="M2010 666 L2010 750"></path>
+      <path class="arrow" d="M2010 826 L2010 905"></path>
+      <path class="arrow highlight" d="M1880 946 C1640 1040, 950 1000, 860 796"></path>
+      <path class="arrow highlight" d="M530 758 C610 758, 640 758, 710 758"></path>
+      <path class="arrow highlight" d="M1010 758 C1110 760, 1120 650, 1160 650"></path>
+      <path class="arrow secondary" d="M530 540 C620 540, 620 948, 710 948"></path>
+      <path class="arrow secondary" d="M1010 948 C1120 1070, 1740 1090, 1880 946"></path>
+      <path class="arrow secondary" d="M1010 948 C1240 1120, 1620 1120, 1820 1200"></path>
+
+      <path class="arrow secondary" d="M860 631 C820 850, 650 1130, 500 1182"></path>
+      <path class="arrow secondary" d="M2010 351 C1950 1030, 760 1100, 710 1182"></path>
+      <path class="arrow secondary" d="M2010 946 C1800 1060, 1100 1120, 1040 1182"></path>
+      <path class="arrow secondary" d="M1280 686 C1320 1050, 1280 1110, 1370 1182"></path>
+      <path class="arrow secondary" d="M1280 610 C1380 1110, 1600 1130, 1660 1182"></path>
+    </svg>
+  </div>
+</body>
+</html>

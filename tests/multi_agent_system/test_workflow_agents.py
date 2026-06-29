@@ -78,17 +78,28 @@ class TestClassifierAgent:
         assert result["priority"] == "P2"
 
     @pytest.mark.asyncio
-    async def test_classify_general_inquiry_uses_local_rule_without_llm(self):
-        """通用咨询句式命中本地规则时不应等待 LLM。"""
+    async def test_classify_general_inquiry_uses_llm_before_local_rule(self):
+        """通用咨询也应先走 LLM 结构化判断，不被本地规则截断。"""
+        mock_response = _make_mock_response({
+            "category": "inquiry",
+            "priority": "P3",
+            "risk_level": "low",
+            "requires_human_review": False,
+            "risk_reason": "",
+            "confidence": 0.91,
+            "reason": "优惠券使用规则咨询",
+        })
+        mock_client = _make_mock_client(mock_response)
         agent = ClassifierAgent(model="test-model", api_key="fake")
+        agent._client = mock_client
 
         result = await agent.classify("咨询一下平台优惠卷如何使用")
 
         assert result["category"] == "inquiry"
         assert result["priority"] == "P3"
-        assert result["confidence"] == 0.85
-        assert "咨询" in result["reason"]
-        assert agent._client is None
+        assert result["confidence"] == 0.91
+        assert "优惠券" in result["reason"]
+        mock_client.chat_completions_create.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_classify_fallback_no_keyword_match(self):

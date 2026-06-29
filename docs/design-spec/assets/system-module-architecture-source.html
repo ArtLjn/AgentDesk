@@ -1,0 +1,290 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AgentDesk 智能工单处理系统模块架构图</title>
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: #ffffff;
+      font-family: "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif;
+      color: #102033;
+    }
+
+    .canvas {
+      position: relative;
+      width: 1800px;
+      height: 1120px;
+      overflow: hidden;
+      background: linear-gradient(180deg, #ffffff 0%, #f9fbff 100%);
+    }
+
+    .title {
+      position: absolute;
+      left: 0;
+      right: 0;
+      top: 28px;
+      text-align: center;
+      font-size: 44px;
+      line-height: 1.25;
+      font-weight: 900;
+      letter-spacing: 0;
+      color: #0f2238;
+    }
+
+    .platform {
+      position: absolute;
+      left: 530px;
+      top: 116px;
+      width: 740px;
+      height: 88px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border: 4px solid #173a5e;
+      border-radius: 18px;
+      background: #f1f6ff;
+      box-shadow: 0 10px 20px rgba(18, 45, 72, 0.10);
+      font-size: 34px;
+      font-weight: 900;
+      color: #173a5e;
+    }
+
+    .module {
+      position: absolute;
+      top: 292px;
+      width: 250px;
+      height: 500px;
+      border: 4px dashed var(--accent);
+      border-radius: 18px;
+      background: var(--bg);
+    }
+
+    .module h2 {
+      margin: 26px 0 22px;
+      text-align: center;
+      font-size: 27px;
+      font-weight: 900;
+      color: var(--accent);
+    }
+
+    .item {
+      width: 194px;
+      min-height: 48px;
+      margin: 14px auto;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 6px 12px;
+      border: 2px solid var(--accent2);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.84);
+      color: #1c2735;
+      text-align: center;
+      font-size: 18px;
+      line-height: 1.22;
+      font-weight: 800;
+      box-shadow: 0 4px 10px rgba(29, 48, 67, 0.05);
+    }
+
+    .item.small {
+      font-size: 17px;
+      min-height: 44px;
+      margin-top: 12px;
+      margin-bottom: 12px;
+    }
+
+    .note {
+      width: 194px;
+      margin: 22px auto 0;
+      color: #7b6434;
+      font-size: 16px;
+      line-height: 1.45;
+      text-align: center;
+      font-weight: 800;
+    }
+
+    .support {
+      position: absolute;
+      left: 45px;
+      top: 865px;
+      width: 1710px;
+      height: 210px;
+      border: 5px solid #173a5e;
+      border-radius: 22px;
+      background: #f2f6fc;
+    }
+
+    .support h2 {
+      margin: 24px 0 16px;
+      text-align: center;
+      font-size: 32px;
+      font-weight: 900;
+      color: #173a5e;
+    }
+
+    .support-grid {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 20px 28px;
+      width: 1520px;
+      margin: 0 auto;
+    }
+
+    .tech {
+      min-height: 56px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 6px 14px;
+      border: 2px solid #46596b;
+      border-radius: 8px;
+      background: #ffffff;
+      text-align: center;
+      font-size: 18px;
+      line-height: 1.25;
+      font-weight: 800;
+      color: #26313e;
+    }
+
+    .m1 { left: 60px; --accent: #4c83a0; --accent2: #5a91a8; --bg: #f4fbff; }
+    .m2 { left: 355px; --accent: #3f9386; --accent2: #55a89a; --bg: #f4fffc; }
+    .m3 { left: 650px; --accent: #b89438; --accent2: #c8a54f; --bg: #fffaf0; }
+    .m4 { left: 945px; --accent: #7d9b3a; --accent2: #91aa52; --bg: #fbfff2; }
+    .m5 { left: 1240px; --accent: #7c6f9f; --accent2: #8b81ad; --bg: #fbf9ff; }
+    .m6 { left: 1535px; --accent: #637a9c; --accent2: #7c8faf; --bg: #f7faff; }
+
+    svg {
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: 1800px;
+      height: 1120px;
+      pointer-events: none;
+    }
+
+    .line {
+      fill: none;
+      stroke: #173a5e;
+      stroke-width: 4;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      marker-end: url(#arrow);
+    }
+
+    .dash {
+      fill: none;
+      stroke: #173a5e;
+      stroke-width: 4;
+      stroke-dasharray: 10 10;
+      stroke-linecap: round;
+      marker-end: url(#arrow);
+    }
+  </style>
+</head>
+<body>
+  <div class="canvas">
+    <div class="title">基于多智能体协同的智能工单处理系统模块架构图</div>
+    <div class="platform">AgentDesk 智能工单处理系统</div>
+
+    <section class="module m1">
+      <h2>用户端模块</h2>
+      <div class="item">工单提交</div>
+      <div class="item">工单列表查询</div>
+      <div class="item">工单详情查看</div>
+      <div class="item">实时进度展示</div>
+      <div class="item">用户补充信息</div>
+      <div class="item">满意度反馈</div>
+    </section>
+
+    <section class="module m2">
+      <h2>管理端模块</h2>
+      <div class="item">登录鉴权</div>
+      <div class="item">仪表盘统计</div>
+      <div class="item">知识库管理</div>
+      <div class="item">Agent 监控</div>
+      <div class="item">Trace 决策追踪</div>
+      <div class="item">系统设置</div>
+    </section>
+
+    <section class="module m3">
+      <h2>人工审核模块</h2>
+      <div class="item">待审核队列</div>
+      <div class="item">审核详情</div>
+      <div class="item">AI 辅助建议</div>
+      <div class="item">五类审核决策</div>
+      <div class="note">通过 / 改写 / 重处理 / 驳回 / 请求补充</div>
+    </section>
+
+    <section class="module m4">
+      <h2>Agent 协同模块</h2>
+      <div class="item small">TicketIntentAgent<br>意图结构化</div>
+      <div class="item small">ClassifierAgent<br>分类与风险识别</div>
+      <div class="item small">ReActProcessorAgent<br>检索与处理</div>
+      <div class="item small">ReviewerAgent<br>质量审核</div>
+      <div class="item small">CoordinatorAgent<br>辅助决策</div>
+    </section>
+
+    <section class="module m5">
+      <h2>工作流编排模块</h2>
+      <div class="item">LangGraph 状态图</div>
+      <div class="item">路由与重试控制</div>
+      <div class="item">人工审核挂起</div>
+      <div class="item">审核后恢复子图</div>
+      <div class="item">用户补充恢复</div>
+    </section>
+
+    <section class="module m6">
+      <h2>实时观测模块</h2>
+      <div class="item">WebSocket 推送</div>
+      <div class="item">Trace 树展示</div>
+      <div class="item">Span 耗时统计</div>
+      <div class="item">决策点提取</div>
+      <div class="item">Prometheus 指标</div>
+    </section>
+
+    <section class="support">
+      <h2>技术支撑模块</h2>
+      <div class="support-grid">
+        <div class="tech">FastAPI<br>HTTP / WebSocket</div>
+        <div class="tech">React + TypeScript<br>前端页面</div>
+        <div class="tech">LangGraph<br>Agent 编排</div>
+        <div class="tech">SQLAlchemy Async<br>数据访问</div>
+        <div class="tech">MySQL<br>业务数据存储</div>
+        <div class="tech">Qdrant<br>向量知识库</div>
+        <div class="tech">OpenAI 兼容接口<br>LLM / Embedding</div>
+        <div class="tech">Trace / Span<br>全链路可观测</div>
+        <div class="tech">Session Cookie<br>轻量登录鉴权</div>
+        <div class="tech">pytest<br>核心流程测试</div>
+      </div>
+    </section>
+
+    <svg viewBox="0 0 1800 1120" aria-hidden="true">
+      <defs>
+        <marker id="arrow" markerWidth="14" markerHeight="14" refX="10" refY="7" orient="auto">
+          <path d="M1,1 L13,7 L1,13 Z" fill="#173a5e"></path>
+        </marker>
+      </defs>
+      <path class="line" d="M900 204 L900 245"></path>
+      <path class="line" d="M185 245 L1660 245"></path>
+      <path class="line" d="M185 245 L185 292"></path>
+      <path class="line" d="M480 245 L480 292"></path>
+      <path class="line" d="M775 245 L775 292"></path>
+      <path class="line" d="M1070 245 L1070 292"></path>
+      <path class="line" d="M1365 245 L1365 292"></path>
+      <path class="line" d="M1660 245 L1660 292"></path>
+      <path class="dash" d="M185 792 L185 865"></path>
+      <path class="dash" d="M480 792 L480 865"></path>
+      <path class="dash" d="M775 792 L775 865"></path>
+      <path class="dash" d="M1070 792 L1070 865"></path>
+      <path class="dash" d="M1365 792 L1365 865"></path>
+      <path class="dash" d="M1660 792 L1660 865"></path>
+    </svg>
+  </div>
+</body>
+</html>

@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Check, Edit3, RefreshCw, X } from 'lucide-react'
+import { Check, Edit3, MessageSquare, RefreshCw, X } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -28,6 +28,7 @@ const OPTIONS: DecisionOption[] = [
   { key: 'approve', label: '通过', icon: Check, color: 'bg-success/90 text-success-foreground hover:bg-success' },
   { key: 'rewrite', label: '改写', icon: Edit3, color: 'bg-primary text-primary-foreground hover:bg-primary/90' },
   { key: 'reprocess', label: '重处理', icon: RefreshCw, color: 'bg-warning text-warning-foreground hover:bg-warning/90', needsConfirm: true },
+  { key: 'request_info', label: '请求补充', icon: MessageSquare, color: 'bg-primary text-primary-foreground hover:bg-primary/90' },
   { key: 'reject', label: '驳回', icon: X, color: 'bg-destructive text-destructive-foreground hover:bg-destructive/90', needsConfirm: true },
 ]
 
@@ -129,12 +130,14 @@ export function DecisionPanel({ detail, reviewerId, onReviewerIdChange, onSubmit
 
             <div>
               <label className="text-[10px] uppercase tracking-wide text-muted-foreground mb-1 block">
-                决策理由（必填）
+                {pendingDecision === 'request_info' ? '补充说明（必填）' : '决策理由（必填）'}
               </label>
               <Textarea
                 value={reason}
                 onChange={(e) => setReason(e.target.value)}
-                placeholder="请说明本次决策的依据..."
+                placeholder={pendingDecision === 'request_info'
+                  ? '请输入希望用户补充的信息，例如订单号、支付流水号...'
+                  : '请说明本次决策的依据...'}
                 rows={3}
                 className="text-sm"
               />

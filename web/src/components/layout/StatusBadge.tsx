@@ -7,6 +7,7 @@ const statusStyles: Record<string, string> = {
   processing: 'bg-primary/15 text-primary',
   reviewing: 'bg-[#a371f7]/15 text-[#a371f7]',
   pending_human_review: 'bg-[#a371f7]/15 text-[#a371f7]',
+  waiting_user_input: 'bg-warning/15 text-warning',
   completed: 'bg-success/15 text-success',
   failed: 'bg-destructive/15 text-destructive',
 }
@@ -17,6 +18,7 @@ const statusLabels: Record<string, string> = {
   processing: '处理中',
   reviewing: '审核中',
   pending_human_review: '待人工审核',
+  waiting_user_input: '待用户补充',
   completed: '已完成',
   failed: '失败',
 }

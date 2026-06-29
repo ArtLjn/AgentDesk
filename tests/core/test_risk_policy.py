@@ -14,16 +14,52 @@ def test_security_report_requires_human_review() -> None:
     assert assessment.trigger_type == "escalate"
 
 
-def test_normal_billing_issue_does_not_require_human_review() -> None:
-    """普通账务问题不应因为出现支付字样就转人工审核。"""
+def test_attack_threat_requires_human_review() -> None:
+    """直接表达攻击意图时，即使被标成咨询也必须人工审核。"""
     assessment = assess_ticket_risk(
-        "支付失败了，请帮我退款",
+        "我发现你们系统的 bug 了，我要攻击你们系统了",
+        category="inquiry",
+        priority="P3",
+    )
+
+    assert assessment.requires_human_review is True
+    assert assessment.risk_level == "high"
+    assert assessment.trigger_type == "escalate"
+    assert "攻击" in assessment.reason
+
+
+def test_billing_knowledge_question_does_not_require_human_review() -> None:
+    """账务规则咨询不应因为出现退款字样就转人工审核。"""
+    assessment = assess_ticket_risk(
+        "退款一般多久到账，平台规则是什么",
         category="billing",
-        priority="P2",
+        priority="P3",
     )
 
     assert assessment.requires_human_review is False
     assert assessment.risk_level == "low"
+
+
+def test_billing_business_action_requires_human_review() -> None:
+    """真实业务动作由结构化契约驱动人工闭环，而不是靠词库命中。"""
+    assessment = assess_ticket_risk(
+        "用户描述了一件账务问题",
+        category="billing",
+        priority="P1",
+        agent_risk={
+            "risk_level": "medium",
+            "requires_human_review": False,
+            "risk_reason": "涉及真实账务处理，需要人工核查订单和支付流水",
+            "requires_business_operation": True,
+            "can_auto_resolve": False,
+            "required_fields": ["order_id", "payment_record"],
+        },
+    )
+
+    assert assessment.requires_human_review is True
+    assert assessment.risk_level == "medium"
+    assert assessment.trigger_type == "escalate"
+    assert "账务处理" in assessment.reason
 
 
 def test_agent_contract_can_force_human_review() -> None:

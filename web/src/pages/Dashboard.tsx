@@ -48,11 +48,12 @@ const statusLabels: Record<string, string> = {
   processing: '处理中',
   reviewing: '审核中',
   pending_human_review: '待人工审核',
+  waiting_user_input: '待用户补充',
   completed: '已完成',
   failed: '失败',
 }
 
-const activeStatuses = new Set(['received', 'classifying', 'processing', 'reviewing', 'pending_human_review'])
+const activeStatuses = new Set(['received', 'classifying', 'processing', 'reviewing', 'pending_human_review', 'waiting_user_input'])
 
 type DistributionItem = {
   name: string

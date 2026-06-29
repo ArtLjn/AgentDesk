@@ -48,6 +48,15 @@ class _StaticReviewerAgent:
         return {"score": 0.9, "feedback": "引用知识库，回复可用"}
 
 
+class _CapturingProcessorAgent:
+    def __init__(self) -> None:
+        self.seen_content = ""
+
+    async def process(self, content: str, category: str, priority: str) -> dict:
+        self.seen_content = content
+        return {"result": "已结合补充信息处理", "references": []}
+
+
 class _StaticLLMClient:
     async def chat_completions_create(self, **kwargs):  # noqa: ANN003, ANN202
         from unittest.mock import MagicMock
@@ -107,6 +116,27 @@ class TestTicketWorkflow:
         assert result["status"] == "completed"
         assert result["references"] == ["优惠券知识库命中: 咨询一下平台优惠券如何使用"]
         assert "按知识库规则使用优惠券" in result["processing_result"]
+
+    @pytest.mark.asyncio
+    async def test_process_includes_user_input_conversation_context(self):
+        """用户补充恢复时，Processor 能看到沟通上下文。"""
+        processor = _CapturingProcessorAgent()
+        graph = build_ticket_graph(agents={
+            "processor": processor,
+            "reviewer": _StaticReviewerAgent(),
+        })
+        state = create_initial_state("退款没有到账")
+        state.update({
+            "category": "billing",
+            "priority": "P2",
+            "conversation_context": "[reviewer] 请补充订单号\n[user] 订单号是 123456",
+        })
+
+        result = await graph.ainvoke(state)
+
+        assert result["status"] == "completed"
+        assert "退款没有到账" in processor.seen_content
+        assert "订单号是 123456" in processor.seen_content
 
     @pytest.mark.asyncio
     async def test_complaint_ticket_escalate(self, graph):
@@ -225,6 +255,17 @@ class TestRouteDecision:
         state = create_initial_state("我发现支付功能有漏洞，付款后会跳转到不知名网页")
         state["category"] = "technical"
         state["priority"] = "P1"
+
+        assert route_decision(state) == "escalate"
+
+    def test_billing_business_action_routes_to_escalate(self):
+        """业务动作 contract 触发人工闭环，避免 Agent 自主归档。"""
+        state = create_initial_state("用户描述了一件账务问题")
+        state["category"] = "billing"
+        state["priority"] = "P1"
+        state["risk_level"] = "medium"
+        state["requires_human_review"] = True
+        state["risk_reason"] = "涉及真实账务处理，需要人工核查订单和支付流水"
 
         assert route_decision(state) == "escalate"
 

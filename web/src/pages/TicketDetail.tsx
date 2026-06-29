@@ -1,15 +1,16 @@
 import { useCallback, useMemo, useState } from 'react'
-import { useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useTicket, useTicketTrace, useTraceDecisions } from '@/hooks/useApi'
 import { useWebSocket } from '@/hooks/useWebSocket'
-import type { Span, TraceDetail, TraceDecisionsResponse, WSMessage } from '@/types'
+import { api } from '@/lib/api'
+import type { Span, TicketMessage, TraceDetail, TraceDecisionsResponse, WSMessage } from '@/types'
 import { buildKnowledgeSearchParams } from '@/lib/knowledgeReference'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
+import { Textarea } from '@/components/ui/textarea'
 import { Separator } from '@/components/ui/separator'
-import { ScrollArea } from '@/components/ui/scroll-area'
 import { Skeleton } from '@/components/ui/skeleton'
 import { StatusBadge, CategoryBadge, PriorityBadge } from '@/components/layout/StatusBadge'
 import { TraceGantt } from '@/components/trace/TraceGantt'
@@ -20,7 +21,7 @@ import { Markdown } from '@/components/ui/markdown'
 import { formatDuration } from '@/components/trace/spanTypes'
 import {
   ArrowLeft, MessageSquare, Brain, Clock, Layers, Bot, Wrench,
-  BookOpen, CheckCircle2, ExternalLink, Activity, Zap, GitFork,
+  BookOpen, ExternalLink, Activity, Zap, GitFork, Send,
 } from 'lucide-react'
 
 export function TicketDetail() {
@@ -34,16 +35,36 @@ export function TicketDetail() {
   const traceDetail = trace as TraceDetail | undefined
   const traceId = traceDetail?.trace_id || ''
   const { data: decisionsResp } = useTraceDecisions(traceId)
+  const { data: ticketMessages = [] } = useQuery({
+    queryKey: ['ticketMessages', id],
+    queryFn: () => api.getTicketMessages(id!),
+    enabled: !!id,
+  })
   const decisions = (decisionsResp as TraceDecisionsResponse | undefined)?.decisions || []
-  const flatSpans = useMemo(() => flattenSpans(traceDetail?.spans || []), [traceDetail])
   const [selectedSpan, setSelectedSpan] = useState<Span | null>(null)
   const [sheetOpen, setSheetOpen] = useState(false)
+  const [reply, setReply] = useState('')
+
+  const submitMessage = useMutation({
+    mutationFn: (content: string) => api.createTicketMessage(id!, {
+      content,
+      sender_id: 'user-001',
+    }),
+    onSuccess: () => {
+      setReply('')
+      qc.invalidateQueries({ queryKey: ['ticketMessages', id] })
+      qc.invalidateQueries({ queryKey: ['ticket', id] })
+      qc.invalidateQueries({ queryKey: ['tickets'] })
+      qc.invalidateQueries({ queryKey: ['ticketTrace', id] })
+    },
+  })
 
   const refreshTicketSnapshot = useCallback((msg: WSMessage) => {
     if (!id || msg.ticket_id !== id) return
     qc.invalidateQueries({ queryKey: ['ticket', id] })
     qc.invalidateQueries({ queryKey: ['tickets'] })
     qc.invalidateQueries({ queryKey: ['ticketTrace', id] })
+    qc.invalidateQueries({ queryKey: ['ticketMessages', id] })
     if (traceId) {
       qc.invalidateQueries({ queryKey: ['traceDecisions', traceId] })
     }
@@ -51,14 +72,7 @@ export function TicketDetail() {
 
   useWebSocket(refreshTicketSnapshot)
 
-  const slowestSpan = flatSpans.reduce<Span | null>((slowest, span) => {
-    if (!slowest) return span
-    return (span.duration || 0) > (slowest.duration || 0) ? span : slowest
-  }, null)
-  const llmCalls = flatSpans.filter((span) => span.span_type === 'llm_call').length
-  const toolCalls = flatSpans.filter((span) => span.span_type === 'tool_call').length
-  const reactIters = flatSpans.filter((span) => span.span_type === 'react_iter').length
-  const errorCount = flatSpans.filter((span) => span.status === 'error').length
+  const traceStats = useMemo(() => buildTraceOverviewStats(traceDetail), [traceDetail])
 
   const handleSelectSpan = (span: Span) => {
     setSelectedSpan(span)
@@ -96,7 +110,7 @@ export function TicketDetail() {
       </div>
 
       <div className="grid grid-cols-12 gap-6">
-        {/* 左侧：基本信息 + 消息链 */}
+        {/* 左侧：工单上下文 + 过程记录 */}
         <div className="col-span-5 space-y-4">
           {/* 基本信息卡片 */}
           <Card className="bg-card border-border">
@@ -174,39 +188,19 @@ export function TicketDetail() {
             </CardContent>
           </Card>
 
-          {/* Agent 消息链 */}
-          <Card className="bg-card border-border">
-            <CardHeader className="pb-3">
-              <CardTitle className="text-sm flex items-center gap-2">
-                <MessageSquare className="w-4 h-4 text-primary" />
-                Agent 消息链
-                <span className="ml-auto text-[11px] font-normal text-muted-foreground">
-                  共 {messages.length} 条
-                </span>
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
-              <ScrollArea className="h-[520px]">
-                {messages.length === 0 ? (
-                  <p className="text-muted-foreground text-sm text-center py-8">等待处理中...</p>
-                ) : (
-                  <div className="space-y-2 pr-2">
-                    {messages.map((msg, i) => (
-                      <div key={i} className="rounded-md bg-background border border-border p-2.5">
-                        <div className="flex items-center gap-2 mb-1">
-                          <span className="text-[10px] font-mono uppercase tracking-wide text-primary bg-primary/10 rounded px-1.5 py-0.5">
-                            {msg.role}
-                          </span>
-                          <span className="text-[10px] text-muted-foreground/60">#{i + 1}</span>
-                        </div>
-                        <Markdown>{msg.content}</Markdown>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </ScrollArea>
-            </CardContent>
-          </Card>
+          <ProcessLogCard
+            agentMessages={messages}
+            messages={ticketMessages}
+            waitingForUser={ticket.status === 'waiting_user_input'}
+            reply={reply}
+            onReplyChange={setReply}
+            onSubmit={() => {
+              const content = reply.trim()
+              if (content) submitMessage.mutate(content)
+            }}
+            submitting={submitMessage.isPending}
+            error={submitMessage.error instanceof Error ? submitMessage.error.message : null}
+          />
         </div>
 
         {/* 右侧：Trace 决策链 */}
@@ -229,26 +223,26 @@ export function TicketDetail() {
                   </CardTitle>
                 </CardHeader>
                 <CardContent>
-                  <div className="grid grid-cols-5 gap-3">
-                    <MiniStat icon={<Clock className="h-4 w-4" />} label="总耗时" value={traceDetail.duration != null ? formatDuration(traceDetail.duration) : '-'} />
-                    <MiniStat icon={<Layers className="h-4 w-4" />} label="节点数" value={traceDetail.node_count} />
-                    <MiniStat icon={<Bot className="h-4 w-4" />} label="LLM 调用" value={llmCalls} />
-                    <MiniStat icon={<Wrench className="h-4 w-4" />} label="工具调用" value={toolCalls} />
-                    <MiniStat icon={<Zap className="h-4 w-4" />} label="ReAct 推理" value={reactIters} />
+                  <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
+                    <MiniStat icon={<Clock className="h-4 w-4" />} label="总耗时" value={formatDuration(traceStats.totalDuration)} />
+                    <MiniStat icon={<Layers className="h-4 w-4" />} label="节点数" value={traceStats.nodeCount} />
+                    <MiniStat icon={<Bot className="h-4 w-4" />} label="LLM 调用" value={traceStats.llmCalls} />
+                    <MiniStat icon={<Wrench className="h-4 w-4" />} label="工具调用" value={traceStats.toolCalls} />
+                    <MiniStat icon={<Zap className="h-4 w-4" />} label="ReAct 推理" value={traceStats.reactIters} />
                   </div>
-                  {(slowestSpan || errorCount > 0) && (
+                  {(traceStats.slowestSpan || traceStats.errorCount > 0) && (
                     <div className="mt-3 grid grid-cols-2 gap-3">
-                      {slowestSpan && (
+                      {traceStats.slowestSpan && (
                         <div className="rounded-md border border-border bg-background p-3 text-xs">
                           <p className="text-muted-foreground mb-0.5">最耗时节点</p>
-                          <p className="font-medium text-foreground truncate">{slowestSpan.name}</p>
-                          <p className="font-mono text-primary mt-0.5">{formatDuration(slowestSpan.duration)}</p>
+                          <p className="font-medium text-foreground truncate">{traceStats.slowestSpan.name}</p>
+                          <p className="font-mono text-primary mt-0.5">{formatDuration(traceStats.slowestSpan.duration)}</p>
                         </div>
                       )}
                       <div className="rounded-md border border-border bg-background p-3 text-xs">
                         <p className="text-muted-foreground mb-0.5">错误节点</p>
-                        <p className={`font-medium ${errorCount > 0 ? 'text-destructive' : 'text-success'}`}>
-                          {errorCount > 0 ? `${errorCount} 个失败` : '全部成功'}
+                        <p className={`font-medium ${traceStats.errorCount > 0 ? 'text-destructive' : 'text-success'}`}>
+                          {traceStats.errorCount > 0 ? `${traceStats.errorCount} 个失败` : '全部成功'}
                         </p>
                       </div>
                     </div>
@@ -268,40 +262,30 @@ export function TicketDetail() {
                   </CardTitle>
                 </CardHeader>
                 <CardContent>
-                  <TraceGantt
-                    spans={traceDetail.spans || []}
-                    onSelect={handleSelectSpan}
-                  />
+                  <div className="max-h-[720px] overflow-y-auto pr-2">
+                    <TraceGantt
+                      spans={traceDetail.spans || []}
+                      onSelect={handleSelectSpan}
+                    />
+                  </div>
                 </CardContent>
               </Card>
 
-              {/* 决策点列表（v1.1 新增） */}
-              <Card className="bg-card border-border">
-                <CardHeader className="pb-3">
-                  <CardTitle className="text-sm flex items-center gap-2">
-                    <GitFork className="w-4 h-4 text-primary" />
-                    决策点明细
-                    <span className="ml-auto text-[11px] font-normal text-muted-foreground">
-                      每个分岔路口 AI 的候选与选择
-                    </span>
-                  </CardTitle>
-                </CardHeader>
-                <CardContent>
-                  <DecisionTimeline decisions={decisions} />
-                </CardContent>
-              </Card>
-
-              {/* 处理结果摘要 */}
-              {ticket.processing_result && (
+              {decisions.length > 0 && (
                 <Card className="bg-card border-border">
                   <CardHeader className="pb-3">
                     <CardTitle className="text-sm flex items-center gap-2">
-                      <CheckCircle2 className="w-4 h-4 text-success" />
-                      处理结论
+                      <GitFork className="w-4 h-4 text-primary" />
+                      决策点明细
+                      <span className="ml-auto text-[11px] font-normal text-muted-foreground">
+                        每个分岔路口 AI 的候选与选择
+                      </span>
                     </CardTitle>
                   </CardHeader>
                   <CardContent>
-                    <Markdown>{ticket.processing_result}</Markdown>
+                    <div className="max-h-[520px] overflow-y-auto pr-2">
+                      <DecisionTimeline decisions={decisions} />
+                    </div>
                   </CardContent>
                 </Card>
               )}
@@ -346,6 +330,228 @@ function MiniStat({ icon, label, value }: { icon: React.ReactNode; label: string
       <p className="text-[10px] text-muted-foreground">{label}</p>
     </div>
   )
+}
+
+function ProcessLogCard({
+  agentMessages,
+  messages,
+  waitingForUser,
+  reply,
+  onReplyChange,
+  onSubmit,
+  submitting,
+  error,
+}: {
+  agentMessages: { role: string; content: string }[]
+  messages: TicketMessage[]
+  waitingForUser: boolean
+  reply: string
+  onReplyChange: (value: string) => void
+  onSubmit: () => void
+  submitting: boolean
+  error: string | null
+}) {
+  return (
+    <Card className="bg-card border-border">
+      <CardHeader className="pb-3">
+        <CardTitle className="text-sm flex items-center gap-2">
+          <MessageSquare className="w-4 h-4 text-primary" />
+          工单过程记录
+          <span className="ml-auto text-[11px] font-normal text-muted-foreground">
+            沟通 {messages.length} 条 · Agent {agentMessages.length} 条
+          </span>
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <div>
+          <p className="mb-2 text-[10px] uppercase tracking-wide text-muted-foreground">用户沟通</p>
+          <div className="max-h-[220px] overflow-y-auto pr-1">
+            {messages.length === 0 ? (
+              <p className="rounded-md border border-dashed border-border py-6 text-center text-sm text-muted-foreground">
+                暂无沟通记录
+              </p>
+            ) : (
+              <div className="space-y-2">
+                {messages.map((message) => (
+                  <div key={message.message_id} className="rounded-md border border-border bg-background p-2.5">
+                    <div className="mb-1 flex items-center gap-2">
+                      <span className="rounded bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary">
+                        {senderLabel(message.sender_type)}
+                      </span>
+                      <span className="text-[10px] text-muted-foreground">
+                        {formatMessageTime(message.created_at)}
+                      </span>
+                    </div>
+                    <Markdown>{message.content}</Markdown>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {waitingForUser && (
+          <div className="space-y-2 rounded-md border border-warning/30 bg-warning/5 p-3">
+            <p className="text-xs font-medium text-warning">待用户补充信息</p>
+            <Textarea
+              value={reply}
+              onChange={(event) => onReplyChange(event.target.value)}
+              placeholder="请输入订单号、支付流水号或其他补充说明..."
+              rows={3}
+              className="text-sm"
+            />
+            <div className="flex items-center gap-2">
+              <Button
+                size="sm"
+                onClick={onSubmit}
+                disabled={!reply.trim() || submitting}
+              >
+                <Send className="mr-1.5 h-3.5 w-3.5" />
+                {submitting ? '提交中...' : '提交补充'}
+              </Button>
+              {error && <span className="text-xs text-destructive">{error}</span>}
+            </div>
+          </div>
+        )}
+
+        <Separator className="bg-border" />
+
+        <div>
+          <p className="mb-2 text-[10px] uppercase tracking-wide text-muted-foreground">Agent 消息链</p>
+          <div className="max-h-[360px] overflow-y-auto pr-1">
+            {agentMessages.length === 0 ? (
+              <p className="rounded-md border border-dashed border-border py-6 text-center text-sm text-muted-foreground">
+                等待处理中...
+              </p>
+            ) : (
+              <div className="space-y-2">
+                {agentMessages.map((msg, index) => (
+                  <div key={`${msg.role}-${index}`} className="rounded-md bg-background border border-border p-2.5">
+                    <div className="flex items-center gap-2 mb-1">
+                      <span className="text-[10px] font-mono uppercase tracking-wide text-primary bg-primary/10 rounded px-1.5 py-0.5">
+                        {msg.role}
+                      </span>
+                      <span className="text-[10px] text-muted-foreground/60">#{index + 1}</span>
+                    </div>
+                    <Markdown>{msg.content}</Markdown>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
+
+function senderLabel(sender: string) {
+  const labels: Record<string, string> = {
+    user: '用户',
+    reviewer: '审核员',
+    system: '系统',
+    agent: 'Agent',
+  }
+  return labels[sender] || sender
+}
+
+function formatMessageTime(value: string) {
+  const time = new Date(value)
+  if (Number.isNaN(time.getTime())) return value
+  return time.toLocaleString('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+}
+
+interface TraceOverviewStats {
+  totalDuration: number | null
+  nodeCount: number
+  llmCalls: number
+  toolCalls: number
+  reactIters: number
+  errorCount: number
+  slowestSpan: Span | null
+}
+
+function buildTraceOverviewStats(traceDetail?: TraceDetail): TraceOverviewStats {
+  const topSpans = traceDetail?.spans || []
+  const flatSpans = flattenSpans(topSpans)
+  const slowestSpan = flatSpans.reduce<Span | null>((slowest, span) => {
+    if (!slowest) return span
+    return getDuration(span) > getDuration(slowest) ? span : slowest
+  }, null)
+
+  return {
+    totalDuration: resolveTraceDuration(traceDetail, topSpans),
+    nodeCount: Math.max(traceDetail?.node_count || 0, flatSpans.length),
+    llmCalls: flatSpans.filter(isLlmSpan).length,
+    toolCalls: flatSpans.filter(isToolSpan).length,
+    reactIters: flatSpans.filter(isReactSpan).length,
+    errorCount: flatSpans.filter(isErrorSpan).length,
+    slowestSpan,
+  }
+}
+
+function resolveTraceDuration(traceDetail: TraceDetail | undefined, topSpans: Span[]) {
+  if (traceDetail?.duration != null) return traceDetail.duration
+
+  if (traceDetail?.start_time != null && traceDetail.end_time != null) {
+    const duration = traceDetail.end_time - traceDetail.start_time
+    if (duration >= 0) return duration
+  }
+
+  const topLevelDuration = topSpans.reduce((sum, span) => sum + getDuration(span), 0)
+  if (topLevelDuration > 0) return topLevelDuration
+
+  const flatSpans = flattenSpans(topSpans)
+  const timedDuration = resolveDurationFromSpanTimes(flatSpans)
+  if (timedDuration != null) return timedDuration
+
+  const maxSpanDuration = Math.max(0, ...flatSpans.map(getDuration))
+  return maxSpanDuration > 0 ? maxSpanDuration : null
+}
+
+function resolveDurationFromSpanTimes(spans: Span[]) {
+  const starts = spans.map((span) => span.start_time).filter(isFiniteNumber)
+  const ends = spans.map((span) => span.end_time).filter(isFiniteNumber)
+  if (starts.length === 0 || ends.length === 0) return null
+
+  const duration = Math.max(...ends) - Math.min(...starts)
+  return duration >= 0 ? duration : null
+}
+
+function getDuration(span: Span) {
+  return span.duration ?? 0
+}
+
+function isLlmSpan(span: Span) {
+  const type = span.span_type.toLowerCase()
+  const name = span.name.toLowerCase()
+  return type === 'llm_call' || name.includes('chat_completion') || name.includes('chat.completion') || name.includes('llm')
+}
+
+function isToolSpan(span: Span) {
+  const type = span.span_type.toLowerCase()
+  const name = span.name.toLowerCase()
+  return type === 'tool_call' || name.includes('knowledge_search') || name.includes('search_knowledge') || name.includes('tool')
+}
+
+function isReactSpan(span: Span) {
+  const type = span.span_type.toLowerCase()
+  const name = span.name.toLowerCase()
+  return type === 'react_iter' || name.includes('react_iter') || name.includes('react ')
+}
+
+function isErrorSpan(span: Span) {
+  const status = span.status.toLowerCase()
+  return status === 'error' || status === 'failed' || status === 'failure'
+}
+
+function isFiniteNumber(value: number | null | undefined): value is number {
+  return typeof value === 'number' && Number.isFinite(value)
 }
 
 function flattenSpans(spans: Span[]): Span[] {

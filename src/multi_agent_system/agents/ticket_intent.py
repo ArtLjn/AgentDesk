@@ -40,6 +40,10 @@ _INTENT_SYSTEM_PROMPT = """\
   "expectation": "用户期望处理结果，没有则为空字符串",
   "contact": "联系方式，没有则为空字符串",
   "occurred_at": "发生时间，没有则为空字符串",
+  "intent_kind": "knowledge_question 或 business_action 或 complaint 或 incident",
+  "requires_business_operation": true 或 false,
+  "required_fields": ["order_id", "payment_record", "user_id"] 中缺少则列出，没有则为空数组,
+  "can_auto_resolve": true 或 false,
   "risk_level": "low 或 medium 或 high 或 critical",
   "requires_human_review": true 或 false,
   "risk_reason": "需要人工审核的风险原因，没有则为空字符串",
@@ -113,8 +117,6 @@ class TicketIntentAgent:
         cleaned = content.strip()
         if not cleaned:
             raise ValueError("工单描述不能为空")
-        if self._client is None:
-            return self.extract_by_fallback(cleaned)
         return await self._extract_by_llm(cleaned)
 
     @with_retry(
@@ -170,6 +172,10 @@ class TicketIntentAgent:
                 "expectation": expectation,
                 "contact": contact,
                 "occurred_at": occurred_at,
+                "intent_kind": cls._guess_intent_kind(content, category),
+                "requires_business_operation": cls._guess_requires_business_operation(content, category),
+                "required_fields": cls._guess_required_fields(content, category),
+                "can_auto_resolve": not cls._guess_requires_business_operation(content, category),
                 "confidence": 0.58,
                 "reason": "本地关键词规则提取",
             },
@@ -193,6 +199,9 @@ class TicketIntentAgent:
                 "risk_level": result.get("risk_level"),
                 "requires_human_review": result.get("requires_human_review"),
                 "risk_reason": result.get("risk_reason"),
+                "requires_business_operation": result.get("requires_business_operation"),
+                "can_auto_resolve": result.get("can_auto_resolve"),
+                "required_fields": result.get("required_fields"),
             },
         )
         if risk.requires_human_review and risk.risk_level in {"high", "critical"}:
@@ -205,6 +214,21 @@ class TicketIntentAgent:
         expectation = str(result.get("expectation") or "").strip()
         contact = str(result.get("contact") or "").strip()
         occurred_at = str(result.get("occurred_at") or "").strip()
+        intent_kind = str(result.get("intent_kind") or TicketIntentAgent._guess_intent_kind(original_content, category)).strip()
+        requires_business_operation = bool(
+            result.get("requires_business_operation")
+            if result.get("requires_business_operation") is not None
+            else TicketIntentAgent._guess_requires_business_operation(original_content, category)
+        )
+        required_fields = result.get("required_fields")
+        if not isinstance(required_fields, list):
+            required_fields = TicketIntentAgent._guess_required_fields(original_content, category)
+        required_fields = [str(field) for field in required_fields if str(field).strip()]
+        can_auto_resolve = bool(
+            result.get("can_auto_resolve")
+            if result.get("can_auto_resolve") is not None
+            else not requires_business_operation
+        )
         reason = str(result.get("reason") or "").strip()
         try:
             confidence = max(0.0, min(1.0, float(result.get("confidence", 0.7))))
@@ -219,6 +243,10 @@ class TicketIntentAgent:
             "expectation": expectation,
             "contact": contact,
             "occurred_at": occurred_at,
+            "intent_kind": intent_kind,
+            "requires_business_operation": requires_business_operation,
+            "required_fields": required_fields,
+            "can_auto_resolve": can_auto_resolve,
             "risk_level": risk.risk_level,
             "requires_human_review": risk.requires_human_review,
             "risk_reason": risk.reason,
@@ -246,6 +274,11 @@ class TicketIntentAgent:
             rows.append(f"【发生时间】{result['occurred_at']}")
         if result["contact"]:
             rows.append(f"【联系方式】{result['contact']}")
+        rows.append(f"【意图类型】{result['intent_kind']}")
+        rows.append(f"【需业务操作】{'是' if result['requires_business_operation'] else '否'}")
+        rows.append(f"【可自动闭环】{'是' if result['can_auto_resolve'] else '否'}")
+        if result["required_fields"]:
+            rows.append(f"【缺失字段】{', '.join(result['required_fields'])}")
         rows.append(f"【风险等级】{result['risk_level']}")
         rows.append(f"【需人工审核】{'是' if result['requires_human_review'] else '否'}")
         if result["requires_human_review"]:
@@ -313,6 +346,37 @@ class TicketIntentAgent:
         if category == TicketCategory.INQUIRY.value:
             return "请告知具体处理方式"
         return ""
+
+    @staticmethod
+    def _guess_intent_kind(content: str, category: str) -> str:
+        if category == TicketCategory.COMPLAINT.value:
+            return "complaint"
+        if re.search(r"怎么|如何|规则|多久到账|能否|是否|入口|使用", content):
+            return "knowledge_question"
+        if TicketIntentAgent._guess_requires_business_operation(content, category):
+            return "business_action"
+        if category == TicketCategory.TECHNICAL.value:
+            return "incident"
+        return "knowledge_question"
+
+    @staticmethod
+    def _guess_requires_business_operation(content: str, category: str) -> bool:
+        if category not in {TicketCategory.BILLING.value, TicketCategory.COMPLAINT.value}:
+            return False
+        if re.search(r"退款|退费|扣款|扣费|多扣|重复|核查|核对|处理|补偿", content, re.IGNORECASE):
+            return not re.search(r"规则|流程|多久到账|怎么|如何", content, re.IGNORECASE)
+        return category == TicketCategory.COMPLAINT.value
+
+    @staticmethod
+    def _guess_required_fields(content: str, category: str) -> list[str]:
+        if not TicketIntentAgent._guess_requires_business_operation(content, category):
+            return []
+        missing: list[str] = []
+        if not re.search(r"(订单号|订单ID|order[_ -]?id|20\d{10,}|[A-Z]{2,}-?\d{6,})", content, re.IGNORECASE):
+            missing.append("order_id")
+        if re.search(r"支付|扣款|扣费|退款|退费", content) and not re.search(r"(流水|凭证|截图|交易号|支付单号)", content):
+            missing.append("payment_record")
+        return missing
 
     @staticmethod
     def create_from_settings() -> "TicketIntentAgent":

@@ -24,6 +24,7 @@ class TicketStatus(str, Enum):
     PROCESSING = "processing"
     REVIEWING = "reviewing"
     PENDING_HUMAN_REVIEW = "pending_human_review"
+    WAITING_USER_INPUT = "waiting_user_input"
     COMPLETED = "completed"
     FAILED = "failed"
 

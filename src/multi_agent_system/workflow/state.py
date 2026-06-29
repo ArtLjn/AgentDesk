@@ -28,6 +28,7 @@ class TicketState(TypedDict):
         __human_decision__: 人工决策信息（仅 resume_from_human_decision 时注入）
         __review_requested__: 标记需广播 review_requested 事件
         __review_decided__: 标记需广播 review_decided 事件
+        conversation_context: 用户补充信息与审核员沟通上下文
     """
 
     ticket_id: str
@@ -59,3 +60,4 @@ class TicketState(TypedDict):
     __human_decision__: dict | None     # 人工决策信息（仅 resume 时注入）
     __review_requested__: bool | None   # 标记需广播 review_requested 事件
     __review_decided__: bool | None     # 标记需广播 review_decided 事件
+    conversation_context: str | None    # 多轮补充信息上下文

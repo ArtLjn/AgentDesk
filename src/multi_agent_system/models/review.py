@@ -33,6 +33,7 @@ class ReviewDecision(str, Enum):
     REJECT = "reject"
     REWRITE = "rewrite"
     REPROCESS = "reprocess"
+    REQUEST_INFO = "request_info"
 
 
 class ReviewStatus(str, Enum):

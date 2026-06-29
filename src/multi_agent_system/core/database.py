@@ -30,6 +30,7 @@ from src.multi_agent_system.models.db import (
     HumanReviewORM,
     PatternORM,
     SpanORM,
+    TicketMessageORM,
     TicketORM,
     TraceORM,
     UserORM,
@@ -726,6 +727,52 @@ class DatabaseManager:
             )
             result = await session.execute(stmt)
             return [self._orm_to_dict(o) for o in result.scalars().all()]
+
+    # ============================================================
+    # Ticket Message CRUD
+    # ============================================================
+
+    async def create_ticket_message(self, message_data: dict[str, Any]) -> None:
+        async with self._session() as session:
+            metadata = message_data.get("metadata") or {}
+            created_at = (
+                self._parse_datetime(message_data.get("created_at"))
+                or datetime.now()
+            )
+            session.add(TicketMessageORM(
+                message_id=message_data["message_id"],
+                ticket_id=message_data["ticket_id"],
+                sender_type=message_data["sender_type"],
+                sender_id=message_data.get("sender_id"),
+                content=message_data["content"],
+                metadata_json=json.dumps(metadata, ensure_ascii=False),
+                created_at=created_at,
+            ))
+            await session.commit()
+
+    async def list_ticket_messages(
+        self,
+        ticket_id: str,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        async with self._session() as session:
+            stmt = (
+                select(TicketMessageORM)
+                .where(TicketMessageORM.ticket_id == ticket_id)
+                .order_by(TicketMessageORM.created_at.asc())
+                .limit(limit)
+            )
+            result = await session.execute(stmt)
+            rows = []
+            for obj in result.scalars().all():
+                row = self._orm_to_dict(obj)
+                raw = row.pop("metadata_json", None)
+                try:
+                    row["metadata"] = json.loads(raw) if raw else {}
+                except json.JSONDecodeError:
+                    row["metadata"] = {}
+                rows.append(row)
+            return rows
 
     async def get_review_stats(self) -> dict[str, Any]:
         async with self._session() as session:

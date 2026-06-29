@@ -234,6 +234,8 @@ export function Tickets() {
                 <SelectItem value="classifying">分类中</SelectItem>
                 <SelectItem value="processing">处理中</SelectItem>
                 <SelectItem value="reviewing">审核中</SelectItem>
+                <SelectItem value="pending_human_review">待人工审核</SelectItem>
+                <SelectItem value="waiting_user_input">待用户补充</SelectItem>
                 <SelectItem value="completed">已完成</SelectItem>
                 <SelectItem value="failed">失败</SelectItem>
               </SelectContent>

@@ -84,13 +84,14 @@ def _suggest_decision_fallback(
 ) -> dict:
     """with_retry 装饰器使用的降级 lambda 替身。
 
-    签名与 _suggest_decision_by_llm 完全一致（含 self），但只透传
-    trigger_type 和 review_score 两个降级所需参数到 fallback_registry。
+    签名与 _suggest_decision_by_llm 完全一致（含 self），直接保留
+    trigger_reason 供 request_info 建议使用。
     """
-    _ = (self, ticket_id, trigger_reason, processing_result)
-    return fallback_registry.execute(
-        "coordinator.suggest_decision", trigger_type, review_score
+    _ = (self, ticket_id, processing_result)
+    result = CoordinatorAgent._fallback_suggest_decision(
+        trigger_type, review_score, trigger_reason
     )
+    return {**result, "fallback": True}
 
 
 class CoordinatorAgent:
@@ -497,7 +498,9 @@ class CoordinatorAgent:
 
     @staticmethod
     def _fallback_suggest_decision(
-        trigger_type: str, review_score: float | None = None
+        trigger_type: str,
+        review_score: float | None = None,
+        trigger_reason: str | None = None,
     ) -> dict:
         """辅助决策降级方案：按触发类型走规则降级。
 
@@ -510,6 +513,16 @@ class CoordinatorAgent:
         """
         _ = review_score  # 保留签名对齐，当前规则不使用
         if trigger_type == "escalate":
+            if trigger_reason and any(
+                marker in trigger_reason
+                for marker in ("缺少", "关键字段", "订单", "支付流水", "补充")
+            ):
+                return {
+                    "recommended_decision": "request_info",
+                    "confidence": 0.65,
+                    "reasoning": "升级原因显示缺少业务处理所需信息，建议先请求用户补充",
+                    "key_concerns": ["需补充订单号或支付凭证"],
+                }
             return {
                 "recommended_decision": "reprocess",
                 "confidence": 0.5,

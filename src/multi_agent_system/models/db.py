@@ -22,6 +22,7 @@ __all__ = [
     "TraceORM",
     "SpanORM",
     "HumanReviewORM",
+    "TicketMessageORM",
 ]
 
 
@@ -174,4 +175,23 @@ class HumanReviewORM(Base):
         Index("idx_hr_ticket", "ticket_id"),
         Index("idx_hr_trigger", "trigger_type"),
         Index("idx_hr_reviewer", "reviewer_id"),
+    )
+
+
+class TicketMessageORM(Base):
+    """工单沟通消息。"""
+
+    __tablename__ = "ticket_messages"
+
+    message_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    ticket_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    sender_type: Mapped[str] = mapped_column(String(24), nullable=False)
+    sender_id: Mapped[str | None] = mapped_column(String(64))
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    metadata_json: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[str | None] = mapped_column(DateTime)
+
+    __table_args__ = (
+        Index("idx_tm_ticket_created", "ticket_id", "created_at"),
+        Index("idx_tm_sender", "sender_type"),
     )

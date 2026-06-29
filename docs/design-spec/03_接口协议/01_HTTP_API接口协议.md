@@ -175,6 +175,61 @@
 
 说明：当 `satisfied=false` 且工单已完成时，系统会创建 `user_request` 类型人工审核单，并将工单状态转为 `pending_human_review`。
 
+### 3.6 查询工单沟通记录
+
+`GET /api/tickets/{ticket_id}/messages`
+
+响应：
+
+```json
+[
+  {
+    "message_id": "TM-20260629-001",
+    "ticket_id": "TK-20260629-001",
+    "sender_type": "reviewer",
+    "sender_id": "reviewer-001",
+    "content": "请补充订单号和支付流水号",
+    "metadata": {"source": "request_info"},
+    "created_at": "2026-06-29T10:00:00"
+  }
+]
+```
+
+说明：该接口用于工单详情页展示审核员请求补充和用户回复。工单不存在时返回 404。
+
+### 3.7 提交用户补充信息
+
+`POST /api/tickets/{ticket_id}/messages`
+
+请求体：
+
+```json
+{
+  "content": "订单号是 202606290001，支付流水号是 PAY123456",
+  "sender_id": "user-001"
+}
+```
+
+响应：
+
+```json
+{
+  "status": "ok",
+  "ticket_id": "TK-20260629-001",
+  "next_node": "complete",
+  "workflow_resumed": true,
+  "ticket_status": "completed"
+}
+```
+
+行为：
+
+1. 校验工单存在。
+2. 校验工单状态必须为 `waiting_user_input`，否则返回 409。
+3. 写入 `ticket_messages`，`sender_type=user`。
+4. 调用 `resume_from_user_input`，读取沟通记录构造 `conversation_context`。
+5. 从 `process` 节点恢复工作流，并通过 WebSocket 推送状态更新。
+
 ## 4. 知识库接口
 
 ### 4.1 查询知识库文档
@@ -363,7 +418,7 @@
 
 ```json
 {
-  "decision": "approve | reject | rewrite | reprocess",
+  "decision": "approve | reject | rewrite | reprocess | request_info",
   "decision_reason": "审核员填写的理由（必填）",
   "rewritten_result": "仅 decision=rewrite 时必填",
   "reviewer_id": "reviewer-001"
@@ -376,12 +431,18 @@
 {
   "status": "ok",
   "ticket_id": "TK-...",
-  "next_node": "notify | process | complete",
+  "next_node": "notify | process | complete | waiting_user_input",
   "workflow_resumed": true
 }
 ```
 
-行为：校验工单状态为 `pending_human_review` → 写入决策 → 触发 `apply_human_decision` 节点 → 推送 WebSocket `review_decided` 事件。
+行为：
+
+- `approve`：沿用当前 `processing_result`，恢复到 `notify → complete`。
+- `rewrite`：用 `rewritten_result` 覆盖处理结果，恢复到 `notify → complete`。
+- `reprocess`：清空处理结果和重试次数，恢复到 `process`。
+- `reject`：标记驳回并进入 `complete`。
+- `request_info`：调用 `pause_for_user_input`，工单进入 `waiting_user_input`，写入一条审核员补充请求消息，本次不恢复自动工作流。
 
 校验规则：
 
@@ -389,6 +450,7 @@
 - 工单状态不是 `pending_human_review` 返回 409。
 - `decision_reason` 必填且不能为空白。
 - `decision=rewrite` 时 `rewritten_result` 必填。
+- `decision=request_info` 时 `decision_reason` 即展示给用户的补充说明。
 
 错误码：
 
@@ -406,7 +468,7 @@
 {
   "pending_count": 3,
   "decided_today": 12,
-  "decision_distribution": {"approve": 7, "rewrite": 3, "reprocess": 1, "reject": 1},
+  "decision_distribution": {"approve": 7, "rewrite": 3, "reprocess": 1, "reject": 1, "request_info": 2},
   "avg_decision_seconds": 320,
   "ai_adoption_rate": 0.58
 }

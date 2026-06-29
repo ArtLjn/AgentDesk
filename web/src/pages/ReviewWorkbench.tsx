@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useMemo, useState, type ReactNode } from 'react'
 import { ShieldCheck } from 'lucide-react'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -96,10 +96,14 @@ export function ReviewWorkbench() {
             ...(rewritten ? { rewritten_result: rewritten } : {}),
           },
         })
-        toast.success(
-          '决策已提交',
-          `下一节点：${res.next_node}${res.workflow_resumed ? '（工作流已恢复）' : ''}`,
-        )
+        if (decision === 'request_info') {
+          toast.success('已请求用户补充信息', `下一节点：${res.next_node}`)
+        } else {
+          toast.success(
+            '决策已提交',
+            `下一节点：${res.next_node}${res.workflow_resumed ? '（工作流已恢复）' : ''}`,
+          )
+        }
         // 选中下一条待审核
         const next = queue.find((q: ReviewQueueItemType) => q.ticket_id !== effectiveSelectedId)
         setSelectedId(next?.ticket_id ?? null)
@@ -124,8 +128,8 @@ export function ReviewWorkbench() {
         </div>
       </div>
 
-      <div className="grid grid-cols-12 gap-4" style={{ minHeight: 'calc(100vh - 160px)' }}>
-        {/* 左栏 30% */}
+      <div className="grid grid-cols-12 items-start gap-4">
+        {/* 左栏：筛选与待审队列 */}
         <aside className="col-span-3 flex flex-col gap-3">
           {/* 筛选器 */}
           <div className="rounded-lg border border-border bg-card p-3 space-y-2">
@@ -168,7 +172,7 @@ export function ReviewWorkbench() {
             </Select>
           </div>
 
-          <div className="flex-1 min-h-0">
+          <div className="max-h-[calc(100vh-360px)] min-h-[360px] overflow-hidden">
             <ReviewQueue
               items={queue}
               selectedId={effectiveSelectedId}
@@ -180,8 +184,8 @@ export function ReviewWorkbench() {
           </div>
         </aside>
 
-        {/* 右栏 70% */}
-        <section className="col-span-9 space-y-4">
+        {/* 右栏：审阅内容 + 决策操作 */}
+        <section className="col-span-9">
           {!effectiveSelectedId ? (
             <EmptyState />
           ) : detailQuery.isLoading ? (
@@ -200,32 +204,89 @@ export function ReviewWorkbench() {
           ) : !detail ? (
             <EmptyState />
           ) : (
-            <>
-              <ReviewDetailPanel detail={detail} />
+            <ol className="space-y-4">
+              <ReviewStep
+                index={1}
+                title="核对工单材料"
+                description="先确认用户原文、分类、优先级与触发审核原因。"
+              >
+                <ReviewDetailPanel detail={detail} />
+              </ReviewStep>
 
-              <div className="grid grid-cols-2 gap-4">
-                <AIProcessingResultCard
-                  processingResult={detail.processing_result}
-                  reviewScore={detail.review_score}
+              <ReviewStep
+                index={2}
+                title="查看 AI 处理与建议"
+                description="对比 AI 处理结果和辅助建议，判断是否可采纳。"
+              >
+                <div className="grid grid-cols-2 items-start gap-4">
+                  <AIProcessingResultCard
+                    processingResult={detail.processing_result}
+                    reviewScore={detail.review_score}
+                  />
+                  <AIAssistanceCard suggestion={detail.current_review?.ai_suggestion ?? null} />
+                </div>
+              </ReviewStep>
+
+              <ReviewStep
+                index={3}
+                title="核查 Trace 证据"
+                description="展开关键节点，查看输入、输出和元数据，确认失败或升级依据。"
+              >
+                <TraceTimeline ticketId={detail.ticket_id} />
+              </ReviewStep>
+
+              <ReviewStep
+                index={4}
+                title="提交人工决策"
+                description="选择通过、改写、重处理、请求补充或驳回，并填写决策理由。"
+                isLast
+              >
+                <DecisionPanel
+                  key={detail.ticket_id}
+                  detail={detail}
+                  reviewerId={reviewerId}
+                  onReviewerIdChange={setReviewerId}
+                  onSubmit={handleSubmit}
+                  submitting={submitMutation.isPending}
                 />
-                <AIAssistanceCard suggestion={detail.current_review?.ai_suggestion ?? null} />
-              </div>
-
-              <TraceTimeline ticketId={detail.ticket_id} />
-
-              <DecisionPanel
-                key={detail.ticket_id}
-                detail={detail}
-                reviewerId={reviewerId}
-                onReviewerIdChange={setReviewerId}
-                onSubmit={handleSubmit}
-                submitting={submitMutation.isPending}
-              />
-            </>
+              </ReviewStep>
+            </ol>
           )}
         </section>
       </div>
     </div>
+  )
+}
+
+function ReviewStep({
+  index,
+  title,
+  description,
+  children,
+  isLast = false,
+}: {
+  index: number
+  title: string
+  description: string
+  children: ReactNode
+  isLast?: boolean
+}) {
+  return (
+    <li className="grid grid-cols-[44px_1fr] gap-3">
+      <div className="relative flex justify-center">
+        <span className="z-10 flex h-9 w-9 items-center justify-center rounded-full border border-primary/50 bg-primary/10 font-mono text-sm font-semibold text-primary">
+          {index}
+        </span>
+        {!isLast && <span className="absolute top-9 bottom-[-1rem] w-px bg-border" />}
+      </div>
+      <div className="space-y-2 pb-1">
+        <div>
+          <h3 className="text-sm font-semibold text-foreground">{title}</h3>
+          <p className="mt-0.5 text-xs text-muted-foreground">{description}</p>
+        </div>
+        {children}
+      </div>
+    </li>
   )
 }
 

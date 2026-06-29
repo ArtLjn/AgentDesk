@@ -32,7 +32,7 @@ _CLASSIFIER_SYSTEM_PROMPT = """\
 
 注意：category 只能选一个，不要组合多个分类。
 请严格按照以下 JSON 格式输出，不要添加任何额外内容：
-{"category": "technical 或 billing 或 complaint 或 inquiry（只选一个）", "priority": "P0 或 P1 或 P2 或 P3（只选一个）", "risk_level": "low 或 medium 或 high 或 critical", "requires_human_review": true 或 false, "risk_reason": "触发人工审核的风险原因，没有则为空字符串", "confidence": 0.0~1.0 的置信度, "reason": "分类和优先级判断的简要理由"}\
+{"category": "technical 或 billing 或 complaint 或 inquiry（只选一个）", "priority": "P0 或 P1 或 P2 或 P3（只选一个）", "intent_kind": "knowledge_question 或 business_action 或 complaint 或 incident", "requires_business_operation": true 或 false, "required_fields": ["order_id", "payment_record", "user_id"] 中缺少则列出，没有则为空数组, "can_auto_resolve": true 或 false, "risk_level": "low 或 medium 或 high 或 critical", "requires_human_review": true 或 false, "risk_reason": "触发人工审核的风险原因，没有则为空字符串", "confidence": 0.0~1.0 的置信度, "reason": "分类和优先级判断的简要理由"}\
 """
 
 # 关键词降级规则（与 graph.py 中的占位逻辑一致）
@@ -104,17 +104,6 @@ class ClassifierAgent:
         Returns:
             包含 category、priority、reason 的字典
         """
-        rule_result = (
-            self._match_keyword_rule(content, confidence=0.85)
-            if self._client is None
-            else None
-        )
-        if rule_result is not None:
-            logger.info(
-                "[Classifier] 命中本地关键词规则，跳过 LLM: "
-                f"{rule_result['category']}/{rule_result['priority']}"
-            )
-            return rule_result
         return await self._classify_by_llm(content)
 
     @with_retry(
@@ -191,6 +180,9 @@ class ClassifierAgent:
                 "risk_level": result.get("risk_level"),
                 "requires_human_review": result.get("requires_human_review"),
                 "risk_reason": result.get("risk_reason"),
+                "requires_business_operation": result.get("requires_business_operation"),
+                "can_auto_resolve": result.get("can_auto_resolve"),
+                "required_fields": result.get("required_fields"),
             },
         )
 
@@ -200,6 +192,10 @@ class ClassifierAgent:
             "risk_level": risk.risk_level,
             "requires_human_review": risk.requires_human_review,
             "risk_reason": risk.reason,
+            "intent_kind": result.get("intent_kind"),
+            "requires_business_operation": bool(result.get("requires_business_operation")),
+            "required_fields": result.get("required_fields") if isinstance(result.get("required_fields"), list) else [],
+            "can_auto_resolve": bool(result.get("can_auto_resolve")),
             "reason": reason,
             "confidence": confidence,
         }

@@ -1,0 +1,593 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AgentDesk 智能工单处理系统框架图</title>
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      width: 2400px;
+      height: 1350px;
+      overflow: hidden;
+      font-family: "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif;
+      color: #162033;
+      background:
+        radial-gradient(circle at 9% 15%, rgba(47, 129, 247, 0.14), transparent 18%),
+        radial-gradient(circle at 88% 16%, rgba(124, 58, 237, 0.11), transparent 18%),
+        radial-gradient(circle at 86% 88%, rgba(34, 197, 94, 0.13), transparent 20%),
+        linear-gradient(135deg, #f8fbff 0%, #eef6ff 52%, #f8fff8 100%);
+    }
+
+    .canvas {
+      position: relative;
+      width: 2400px;
+      height: 1350px;
+      padding: 42px 54px 44px;
+    }
+
+    .title {
+      text-align: center;
+      font-size: 56px;
+      line-height: 1.1;
+      font-weight: 900;
+      letter-spacing: 1px;
+      color: #0f172a;
+    }
+
+    .subtitle {
+      margin-top: 13px;
+      text-align: center;
+      font-size: 25px;
+      font-weight: 500;
+      color: #52637a;
+    }
+
+    .diagram {
+      position: relative;
+      margin-top: 30px;
+      display: grid;
+      grid-template-columns: 292px 1fr 395px;
+      grid-template-rows: 910px 154px;
+      gap: 28px;
+    }
+
+    .panel {
+      border: 2px solid #b9c8da;
+      background: rgba(255, 255, 255, 0.94);
+      border-radius: 26px;
+      box-shadow: 0 18px 42px rgba(15, 23, 42, 0.12);
+      overflow: hidden;
+    }
+
+    .head {
+      height: 68px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      padding: 0 26px;
+      color: #fff;
+      font-size: 29px;
+      font-weight: 850;
+    }
+
+    .num {
+      display: inline-grid;
+      place-items: center;
+      width: 44px;
+      height: 44px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.2);
+      font-size: 25px;
+      font-weight: 900;
+    }
+
+    .blue-head {
+      background: linear-gradient(90deg, #2f81f7, #06b6d4);
+    }
+
+    .purple-head {
+      background: linear-gradient(90deg, #5b21b6, #7c3aed);
+    }
+
+    .green-head {
+      background: linear-gradient(90deg, #15803d, #22c55e);
+    }
+
+    .orange-head {
+      background: linear-gradient(90deg, #ea580c, #f97316);
+    }
+
+    .left-panel {
+      grid-column: 1;
+      grid-row: 1;
+    }
+
+    .main-panel {
+      grid-column: 2;
+      grid-row: 1;
+      padding: 0 36px 32px;
+    }
+
+    .right-panel {
+      grid-column: 3;
+      grid-row: 1;
+    }
+
+    .data-panel {
+      grid-column: 2;
+      grid-row: 2;
+    }
+
+    .main-title {
+      height: 70px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 32px;
+      font-weight: 900;
+      color: #0f172a;
+    }
+
+    .layer {
+      position: relative;
+      margin-bottom: 22px;
+      border-radius: 20px;
+      border: 2px solid;
+      overflow: hidden;
+    }
+
+    .layer .head {
+      height: 54px;
+      font-size: 27px;
+      padding: 0 24px;
+    }
+
+    .layer .num {
+      width: 37px;
+      height: 37px;
+      font-size: 21px;
+    }
+
+    .layer-caption {
+      margin-left: 8px;
+      font-size: 17px;
+      font-weight: 650;
+      opacity: 0.9;
+    }
+
+    .layer-body {
+      padding: 22px 24px;
+      display: grid;
+      gap: 18px;
+    }
+
+    .grid6 {
+      grid-template-columns: repeat(6, 1fr);
+    }
+
+    .grid5 {
+      grid-template-columns: 1.05fr 1fr 1.18fr 1fr 1.26fr;
+    }
+
+    .module {
+      min-height: 66px;
+      border-radius: 14px;
+      border: 2px solid #9bb1ca;
+      background: #fff;
+      box-shadow: 0 8px 18px rgba(15, 23, 42, 0.08);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+      text-align: center;
+      padding: 8px 10px;
+    }
+
+    .module strong {
+      font-size: 22px;
+      line-height: 1.08;
+      font-weight: 850;
+      color: #152238;
+      white-space: nowrap;
+    }
+
+    .module span {
+      margin-top: 6px;
+      font-size: 15px;
+      line-height: 1.18;
+      color: #64748b;
+      white-space: nowrap;
+    }
+
+    .blue {
+      background: #eff6ff;
+      border-color: #2f81f7;
+    }
+
+    .cyan {
+      background: #ecfeff;
+      border-color: #0891b2;
+    }
+
+    .purple {
+      background: #f5f3ff;
+      border-color: #7c3aed;
+    }
+
+    .green {
+      background: #f0fdf4;
+      border-color: #15803d;
+    }
+
+    .orange {
+      background: #fff7ed;
+      border-color: #ea580c;
+    }
+
+    .layer.front {
+      background: rgba(239, 246, 255, 0.8);
+      border-color: #2f81f7;
+    }
+
+    .layer.api {
+      background: rgba(236, 254, 255, 0.8);
+      border-color: #0891b2;
+    }
+
+    .layer.agent {
+      background: rgba(245, 243, 255, 0.92);
+      border-color: #7c3aed;
+    }
+
+    .layer.platform {
+      background: rgba(240, 253, 244, 0.85);
+      border-color: #15803d;
+    }
+
+    .coordinator {
+      width: 720px;
+      height: 64px;
+      margin: 0 auto 22px;
+      border-radius: 18px;
+      border: 3px solid #6d28d9;
+      background: #fff;
+      box-shadow: 0 10px 22px rgba(91, 33, 182, 0.14);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 24px;
+      font-weight: 900;
+      color: #4c1d95;
+    }
+
+    .role-block {
+      padding: 34px 24px;
+      text-align: center;
+    }
+
+    .person {
+      width: 128px;
+      height: 128px;
+      margin: 18px auto 22px;
+      border-radius: 999px;
+      position: relative;
+    }
+
+    .person::before {
+      content: "";
+      position: absolute;
+      left: 48px;
+      top: 25px;
+      width: 34px;
+      height: 34px;
+      border-radius: 999px;
+      background: currentColor;
+    }
+
+    .person::after {
+      content: "";
+      position: absolute;
+      left: 32px;
+      top: 74px;
+      width: 66px;
+      height: 42px;
+      border-radius: 50% 50% 8px 8px;
+      background: currentColor;
+    }
+
+    .user {
+      color: #1f6feb;
+      background: #dbeafe;
+    }
+
+    .reviewer {
+      color: #16a34a;
+      background: #dcfce7;
+    }
+
+    .role-title {
+      font-size: 28px;
+      font-weight: 900;
+      color: #0f172a;
+    }
+
+    .role-text {
+      margin-top: 10px;
+      font-size: 18px;
+      line-height: 1.35;
+      color: #52637a;
+    }
+
+    .divider {
+      width: 210px;
+      height: 2px;
+      margin: 38px auto;
+      background: #cbd5e1;
+    }
+
+    .external-list {
+      padding: 34px 28px;
+      display: grid;
+      gap: 24px;
+    }
+
+    .external-card {
+      min-height: 104px;
+      border-radius: 18px;
+      border: 2px solid;
+      background: #fff;
+      box-shadow: 0 10px 20px rgba(15, 23, 42, 0.08);
+      padding: 20px 22px;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      text-align: center;
+    }
+
+    .external-card strong {
+      font-size: 24px;
+      font-weight: 900;
+      color: #142033;
+    }
+
+    .external-card span {
+      margin-top: 7px;
+      font-size: 17px;
+      color: #607086;
+    }
+
+    .human-box {
+      border-color: #ea580c;
+      background: #fff7ed;
+      min-height: 142px;
+    }
+
+    .data-body {
+      height: 86px;
+      padding: 16px 28px;
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 22px;
+    }
+
+    .arrow-layer {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+    }
+
+    .arrow {
+      position: absolute;
+      background: #2f81f7;
+      transform-origin: left center;
+      height: 4px;
+      border-radius: 99px;
+    }
+
+    .arrow::after {
+      content: "";
+      position: absolute;
+      right: -2px;
+      top: -7px;
+      border-left: 14px solid currentColor;
+      border-top: 9px solid transparent;
+      border-bottom: 9px solid transparent;
+      color: inherit;
+    }
+
+    .arrow.blue {
+      color: #2f81f7;
+      background: #2f81f7;
+    }
+
+    .arrow.green {
+      color: #15803d;
+      background: #15803d;
+    }
+
+    .arrow.orange {
+      color: #ea580c;
+      background: #ea580c;
+    }
+
+    .arrow.dashed {
+      background: repeating-linear-gradient(90deg, currentColor 0 12px, transparent 12px 22px);
+    }
+
+    .down {
+      width: 44px;
+      transform: rotate(90deg);
+    }
+
+    .caption {
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: 16px;
+      text-align: center;
+      font-size: 25px;
+      color: #334155;
+      font-weight: 650;
+    }
+
+    .legend {
+      position: absolute;
+      left: 54px;
+      bottom: 42px;
+      width: 292px;
+      height: 136px;
+      border: 2px dashed #8fb4e8;
+      border-radius: 18px;
+      background: rgba(255, 255, 255, 0.88);
+      padding: 18px 22px;
+    }
+
+    .legend-title {
+      font-size: 21px;
+      font-weight: 850;
+      margin-bottom: 14px;
+    }
+
+    .legend-row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-top: 9px;
+      font-size: 16px;
+      color: #52637a;
+    }
+
+    .line-sample {
+      width: 54px;
+      height: 4px;
+      border-radius: 999px;
+      background: #2f81f7;
+    }
+
+    .line-sample.dashed {
+      background: repeating-linear-gradient(90deg, #ea580c 0 10px, transparent 10px 18px);
+    }
+  </style>
+</head>
+<body>
+  <main class="canvas">
+    <div class="title">AgentDesk 智能工单处理系统框架图</div>
+    <div class="subtitle">多智能体协同架构：用户入口、接口服务、Agent 决策、平台能力、数据支撑与外部模型服务</div>
+
+    <section class="diagram">
+      <aside class="panel left-panel">
+        <div class="head blue-head"><span class="num">1</span>用户与角色</div>
+        <div class="role-block">
+          <div class="person user"></div>
+          <div class="role-title">普通用户</div>
+          <div class="role-text">自然语言提交工单<br />查看处理进度与结果</div>
+          <div class="divider"></div>
+          <div class="person reviewer"></div>
+          <div class="role-title">审核员 / 管理员</div>
+          <div class="role-text">处理待审核工单<br />决策回写工作流</div>
+        </div>
+      </aside>
+
+      <section class="panel main-panel">
+        <div class="main-title">AgentDesk 系统主体</div>
+
+        <div class="layer front">
+          <div class="head blue-head"><span class="num">2</span>前端表现层 <span class="layer-caption">React + TypeScript 管理端</span></div>
+          <div class="layer-body grid6">
+            <div class="module blue"><strong>登录 / 仪表盘</strong></div>
+            <div class="module blue"><strong>工单管理</strong></div>
+            <div class="module blue"><strong>审核工作台</strong></div>
+            <div class="module blue"><strong>Agent 监控</strong></div>
+            <div class="module blue"><strong>知识库</strong></div>
+            <div class="module blue"><strong>设置与统计</strong></div>
+          </div>
+        </div>
+
+        <div class="layer api">
+          <div class="head blue-head"><span class="num">3</span>接口与通信层 <span class="layer-caption">FastAPI · Session 鉴权 · WebSocket</span></div>
+          <div class="layer-body grid6">
+            <div class="module cyan"><strong>登录鉴权接口</strong></div>
+            <div class="module cyan"><strong>工单接口</strong></div>
+            <div class="module cyan"><strong>审核接口</strong></div>
+            <div class="module cyan"><strong>追踪接口</strong></div>
+            <div class="module cyan"><strong>知识库接口</strong></div>
+            <div class="module cyan"><strong>实时推送通道</strong></div>
+          </div>
+        </div>
+
+        <div class="layer agent">
+          <div class="head purple-head"><span class="num">4</span>Agent 编排与智能决策层 <span class="layer-caption">LangGraph 状态图 · 人机协同恢复子图</span></div>
+          <div class="layer-body">
+            <div class="coordinator">CoordinatorAgent：全局调度 / 辅助审核 / 恢复决策</div>
+            <div class="layer-body grid5" style="padding:0">
+              <div class="module purple"><strong>意图理解 Agent</strong><span>自然语言结构化</span></div>
+              <div class="module purple"><strong>分类 Agent</strong><span>分类与优先级</span></div>
+              <div class="module purple"><strong>处理 Agent</strong><span>检索 / 工具 / 生成</span></div>
+              <div class="module purple"><strong>审核 Agent</strong><span>质量评分与复核</span></div>
+              <div class="module purple"><strong>人工审核恢复</strong><span>通过 / 改写 / 重处理 / 驳回</span></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="layer platform">
+          <div class="head green-head"><span class="num">5</span>平台能力层 <span class="layer-caption">稳定性、可观测性与运行支撑</span></div>
+          <div class="layer-body grid6">
+            <div class="module green"><strong>模型路由</strong></div>
+            <div class="module green"><strong>LLM 缓存</strong></div>
+            <div class="module green"><strong>重试降级</strong></div>
+            <div class="module green"><strong>权限控制</strong></div>
+            <div class="module green"><strong>执行追踪</strong></div>
+            <div class="module green"><strong>指标监控</strong></div>
+          </div>
+        </div>
+      </section>
+
+      <aside class="panel right-panel">
+        <div class="head orange-head"><span class="num">7</span>外部依赖与运行支撑</div>
+        <div class="external-list">
+          <div class="external-card orange"><strong>大模型接口</strong><span>意图理解 · 生成 · 评审</span></div>
+          <div class="external-card orange"><strong>向量嵌入接口</strong><span>知识文档向量化</span></div>
+          <div class="external-card orange"><strong>Qdrant 向量库</strong><span>知识检索与分块存储</span></div>
+          <div class="external-card human-box"><strong>人工审核队列</strong><span>审核单 · AI 建议 · 决策恢复</span></div>
+          <div class="external-card orange"><strong>Prometheus 指标</strong><span>HTTP / Agent / LLM 指标</span></div>
+        </div>
+      </aside>
+
+      <section class="panel data-panel">
+        <div class="head green-head"><span class="num">6</span>数据与知识层 <span class="layer-caption">SQLAlchemy async + MySQL · Qdrant 向量库</span></div>
+        <div class="data-body">
+          <div class="module green"><strong>业务主库</strong><span>tickets / users</span></div>
+          <div class="module green"><strong>人工审核表</strong><span>human_reviews</span></div>
+          <div class="module green"><strong>执行追踪表</strong><span>traces / spans</span></div>
+          <div class="module green"><strong>向量知识库</strong><span>Qdrant</span></div>
+          <div class="module green"><strong>系统配置</strong><span>config.yaml</span></div>
+        </div>
+      </section>
+    </section>
+
+    <div class="arrow-layer">
+      <div class="arrow blue" style="left:331px;top:501px;width:62px;"></div>
+      <div class="arrow blue down" style="left:1168px;top:452px;"></div>
+      <div class="arrow blue down" style="left:1168px;top:626px;"></div>
+      <div class="arrow green down" style="left:1168px;top:882px;"></div>
+      <div class="arrow green down" style="left:1168px;top:1060px;width:70px;"></div>
+      <div class="arrow orange" style="left:1850px;top:682px;width:92px;"></div>
+      <div class="arrow orange dashed" style="left:1875px;top:394px;width:86px;transform:rotate(-31deg);"></div>
+      <div class="arrow orange dashed" style="left:1858px;top:805px;width:100px;transform:rotate(20deg);"></div>
+      <div class="arrow green dashed" style="left:1850px;top:968px;width:116px;transform:rotate(-8deg);"></div>
+    </div>
+
+    <div class="legend">
+      <div class="legend-title">图例</div>
+      <div class="legend-row"><span class="line-sample"></span>主调用 / 数据流</div>
+      <div class="legend-row"><span class="line-sample dashed"></span>外部服务 / 异步支撑</div>
+    </div>
+    <div class="caption">图 4-1 AgentDesk 智能工单处理系统框架图</div>
+  </main>
+</body>
+</html>

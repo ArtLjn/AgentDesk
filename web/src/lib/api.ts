@@ -7,6 +7,8 @@ import type {
   TicketCreateResponse,
   TicketFeedbackResponse,
   TicketListParams,
+  TicketMessage,
+  TicketMessageCreateRequest,
   TraceDecisionsResponse,
   TraceDetail,
   TraceListResponse,
@@ -81,6 +83,13 @@ export const api = {
     request<TicketCreateResponse>('/tickets', { method: 'POST', body: JSON.stringify(data) }),
   submitFeedback: (id: string, satisfied: boolean) =>
     request<TicketFeedbackResponse>(`/tickets/${id}/feedback`, { method: 'POST', body: JSON.stringify({ satisfied }) }),
+  getTicketMessages: (id: string) =>
+    request<TicketMessage[]>(`/tickets/${encodeURIComponent(id)}/messages`),
+  createTicketMessage: (id: string, data: TicketMessageCreateRequest) =>
+    request<ApiRecord>(`/tickets/${encodeURIComponent(id)}/messages`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
 
   // Trace
   getTraces: (params?: Record<string, string>) => {
