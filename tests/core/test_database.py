@@ -2,7 +2,9 @@ from datetime import datetime, timedelta
 
 import pytest
 
+from src.multi_agent_system.config import Settings
 from src.multi_agent_system.core.database import DatabaseManager
+from src.multi_agent_system.models.db import Base, HumanReviewORM, TicketORM
 from tests.conftest import TEST_DATABASE_URL
 
 
@@ -21,17 +23,23 @@ async def test_database_initializes_tables():
     await manager.initialize()
     await manager.truncate_all()
 
-    async with manager.connection() as conn:
-        cursor = await conn.execute(
-            "SELECT TABLE_NAME FROM information_schema.tables "
-            "WHERE TABLE_SCHEMA = DATABASE()"
-        )
-        tables = {row[0] for row in await cursor.fetchall()}
-
+    tables = set(Base.metadata.tables)
     assert "tickets" in tables
     assert "users" in tables
     assert "checkpoints" in tables
     assert "patterns" in tables
+
+    await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_truncate_all_rejects_non_test_database():
+    """truncate_all 不允许清理未显式标记为 test 的数据库。"""
+    manager = DatabaseManager(database_url=Settings().database_url)
+    await manager.initialize()
+
+    with pytest.raises(RuntimeError, match="拒绝清空非测试数据库"):
+        await manager.truncate_all()
 
     await manager.close()
 
@@ -117,28 +125,18 @@ async def test_human_reviews_table_and_indexes_created():
     await manager.initialize()
     await manager.truncate_all()
 
-    async with manager.connection() as conn:
-        cursor = await conn.execute(
-            "SELECT TABLE_NAME FROM information_schema.tables "
-            "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'human_reviews'"
-        )
-        tables = {row[0] for row in await cursor.fetchall()}
-        assert "human_reviews" in tables
+    assert "human_reviews" in Base.metadata.tables
 
-        cursor = await conn.execute(
-            "SELECT DISTINCT INDEX_NAME FROM information_schema.statistics "
-            "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'human_reviews'"
-        )
-        indexes = {row[0] for row in await cursor.fetchall()}
-        assert {"idx_hr_status", "idx_hr_ticket", "idx_hr_trigger", "idx_hr_reviewer"} <= indexes
+    indexes = {idx.name for idx in HumanReviewORM.__table__.indexes}
+    assert {"idx_hr_status", "idx_hr_ticket", "idx_hr_trigger", "idx_hr_reviewer"} <= indexes
 
-        cursor = await conn.execute(
-            "SELECT DISTINCT INDEX_NAME FROM information_schema.statistics "
-            "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'tickets'"
-        )
-        tickets_indexes = {row[0] for row in await cursor.fetchall()}
-        assert {"idx_tickets_user", "idx_tickets_status", "idx_tickets_category",
-                "idx_tickets_status_created"} <= tickets_indexes
+    tickets_indexes = {idx.name for idx in TicketORM.__table__.indexes}
+    assert {
+        "idx_tickets_user",
+        "idx_tickets_status",
+        "idx_tickets_category",
+        "idx_tickets_status_created",
+    } <= tickets_indexes
 
     await manager.close()
 

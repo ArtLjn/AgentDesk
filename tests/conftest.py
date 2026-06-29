@@ -1,18 +1,23 @@
 """pytest 共享 fixture。
 
-所有测试连同一个 MySQL 测试库（生产环境共用 ai_agent_learning），
+测试默认使用独立的 ``*_test`` 数据库，禁止直接复用业务库。
 每个测试 fixture setup 时调 truncate_all() 保证用例间数据隔离。
 """
 
 import os
+from pathlib import Path
 
 import pytest_asyncio
 
-from src.multi_agent_system.config import Settings
 from src.multi_agent_system.core.database import DatabaseManager
 
-# 测试库 URL：默认读 config.yaml 的 database_url，可用 TEST_DATABASE_URL 环境变量覆盖
-TEST_DATABASE_URL = os.environ.get("TEST_DATABASE_URL", Settings().database_url)
+
+# 测试库 URL：默认使用本地 SQLite 测试库，可用 TEST_DATABASE_URL 覆盖
+TEST_DATABASE_URL = os.environ.get(
+    "TEST_DATABASE_URL",
+    "sqlite+aiosqlite:///tests/.tmp/ai_agent_learning_test.db",
+)
+Path("tests/.tmp").mkdir(parents=True, exist_ok=True)
 
 
 @pytest_asyncio.fixture

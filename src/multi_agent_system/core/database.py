@@ -15,6 +15,7 @@ from typing import Any, AsyncGenerator
 
 from loguru import logger
 from sqlalchemy import case, func, select, text
+from sqlalchemy.engine import make_url
 from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import (
     AsyncConnection,
@@ -151,13 +152,25 @@ class DatabaseManager:
         """清空所有业务表数据（保留表结构）。供测试 fixture 隔离使用。"""
         if self._engine is None:
             raise RuntimeError("Database not initialized. Call initialize() first.")
+        url = make_url(self._url)
+        database_name = url.database or ""
+        if "test" not in database_name.lower():
+            raise RuntimeError(
+                f"拒绝清空非测试数据库: {database_name or '<unknown>'}"
+            )
         table_names = list(reversed(sorted(Base.metadata.tables.keys())))
         async with self._engine.begin() as conn:
-            # MySQL 的 TRUNCATE 一次只能清一张表
-            await conn.execute(text("SET FOREIGN_KEY_CHECKS = 0"))
-            for t in table_names:
-                await conn.execute(text(f"TRUNCATE TABLE `{t}`"))
-            await conn.execute(text("SET FOREIGN_KEY_CHECKS = 1"))
+            if url.drivername.startswith("mysql"):
+                # MySQL 的 TRUNCATE 一次只能清一张表
+                await conn.execute(text("SET FOREIGN_KEY_CHECKS = 0"))
+                for t in table_names:
+                    await conn.execute(text(f"TRUNCATE TABLE `{t}`"))
+                await conn.execute(text("SET FOREIGN_KEY_CHECKS = 1"))
+            else:
+                await conn.execute(text("PRAGMA foreign_keys = OFF"))
+                for t in table_names:
+                    await conn.execute(text(f'DELETE FROM "{t}"'))
+                await conn.execute(text("PRAGMA foreign_keys = ON"))
         logger.debug(f"[Database] Truncated {len(table_names)} tables")
 
     @asynccontextmanager

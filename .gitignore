@@ -39,7 +39,10 @@ logs/
 .claude/commands/
 .claude/skills/
 .claude/worktrees/
+web/.claude/
 
 # Node 临时产物
 web/.node_modules-trashed
 
+# Test temp data
+tests/.tmp/
