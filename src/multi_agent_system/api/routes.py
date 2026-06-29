@@ -14,6 +14,7 @@ from src.multi_agent_system.models.ticket import (
     TicketCreate,
     TicketResponse,
 )
+from src.multi_agent_system.agents.ticket_intent import TicketIntentAgent
 from src.multi_agent_system.models.review import ReviewDecisionRequest
 from src.multi_agent_system.workflow.graph import create_initial_state
 
@@ -78,16 +79,30 @@ def _enrich_trace(trace: dict[str, Any]) -> dict[str, Any]:
 
 @router.post("/tickets", response_model=dict)
 async def create_ticket(body: TicketCreate, request: Request) -> dict:
-    """提交新工单，触发工作流后台执行，立即返回 ticket_id。"""
-    state = create_initial_state(content=body.content)
+    """提交新工单，由 Agent 理解用户意图后触发工作流。"""
+    intent_agent = getattr(request.app.state, "ticket_intent_agent", None)
+    if intent_agent is None:
+        intent = TicketIntentAgent.extract_by_fallback(body.content)
+    else:
+        try:
+            intent = await intent_agent.extract(body.content)
+        except Exception as e:
+            logger.warning(f"工单意图理解失败，使用本地规则兜底: {e}")
+            intent = TicketIntentAgent.extract_by_fallback(body.content)
+
+    state = create_initial_state(content=intent["content"])
+    state["category"] = intent.get("category")
+    state["priority"] = intent.get("priority")
     ticket_id = state["ticket_id"]
 
     # 保存初始状态到数据库
     db_tool = request.app.state.db_tool
     ticket_data = {
         "ticket_id": ticket_id,
-        "content": body.content,
+        "content": intent["content"],
         "user_id": body.user_id,
+        "category": intent.get("category"),
+        "priority": intent.get("priority"),
         "status": state["status"],
         "created_at": datetime.now().isoformat(),
     }

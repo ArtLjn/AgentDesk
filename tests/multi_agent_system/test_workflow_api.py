@@ -34,6 +34,32 @@ class _FakeWorkflow:
         yield {"complete": {"status": "completed"}}
 
 
+class _FakeTicketIntentAgent:
+    """测试用意图理解 Agent，返回确定的结构化工单。"""
+
+    async def extract(self, content: str) -> dict:
+        return {
+            "title": "系统无法登录",
+            "category": "technical",
+            "priority": "P1",
+            "impact": "部分用户受影响",
+            "expectation": "尽快恢复登录",
+            "contact": "ops@example.com",
+            "occurred_at": "今天 10:15",
+            "confidence": 0.92,
+            "reason": "测试固定结果",
+            "content": (
+                "【问题标题】系统无法登录\n"
+                "【问题类型】技术支持\n"
+                "【紧急程度】P1 高\n"
+                "【影响范围】部分用户受影响\n"
+                "【期望处理】尽快恢复登录\n"
+                "【联系方式】ops@example.com\n"
+                f"【原始描述】{content}"
+            ),
+        }
+
+
 @pytest.fixture
 def app():
     """构建测试用 FastAPI 应用，db_manager 在 lifespan 内创建。"""
@@ -49,6 +75,7 @@ def app():
         application.state.db_tool = db_tool
         application.state.settings = Settings()
         application.state.workflow = _FakeWorkflow()
+        application.state.ticket_intent_agent = _FakeTicketIntentAgent()
         application.state.knowledge_tool = mock_knowledge_tool
         application.state.analytics_tool = analytics_tool
         yield
@@ -91,6 +118,23 @@ class TestTicketAPI:
 
         assert response.status_code == 200
         assert "ticket_id" in response.json()
+
+    def test_create_ticket_uses_intent_agent(self, client):
+        """POST /api/tickets 使用 Agent 理解自然语言并保存结构化字段。"""
+        response = client.post(
+            "/api/tickets",
+            json={"content": "今天 10:15 系统无法登录，请尽快恢复", "user_id": "U007"},
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        ticket = client.app.state._portal.call(
+            client.app.state.db_tool.get_ticket,
+            data["ticket_id"],
+        )
+        assert ticket["category"] == "technical"
+        assert ticket["priority"] == "P1"
+        assert "【原始描述】今天 10:15 系统无法登录，请尽快恢复" in ticket["content"]
 
     def test_get_ticket(self, client):
         """GET /api/tickets/{id} 查询工单详情。"""

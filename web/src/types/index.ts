@@ -198,7 +198,10 @@ export interface TicketListParams {
   offset?: string
 }
 
-export type TicketCreateResponse = Ticket
+export interface TicketCreateResponse {
+  ticket_id: string
+  status: string
+}
 
 export interface TicketFeedbackResponse {
   status: string

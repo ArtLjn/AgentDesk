@@ -4,10 +4,12 @@ from .classifier import ClassifierAgent
 from .coordinator import CoordinatorAgent
 from .processor import ProcessorAgent
 from .reviewer import ReviewerAgent
+from .ticket_intent import TicketIntentAgent
 
 __all__ = [
     "ClassifierAgent",
     "CoordinatorAgent",
     "ProcessorAgent",
     "ReviewerAgent",
+    "TicketIntentAgent",
 ]

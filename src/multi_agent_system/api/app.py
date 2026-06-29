@@ -17,6 +17,7 @@ from src.multi_agent_system.agents.classifier import ClassifierAgent
 from src.multi_agent_system.agents.coordinator import CoordinatorAgent
 from src.multi_agent_system.agents.processor import ReActProcessorAgent
 from src.multi_agent_system.agents.reviewer import ReviewerAgent
+from src.multi_agent_system.agents.ticket_intent import TicketIntentAgent
 from src.multi_agent_system.api.auth_routes import router as auth_router
 from src.multi_agent_system.config import Settings
 from src.multi_agent_system.core.auth import require_login
@@ -76,6 +77,7 @@ async def lifespan(app: FastAPI):
 
     # Initialize Agents
     classifier = ClassifierAgent.create_from_settings()
+    ticket_intent_agent = TicketIntentAgent.create_from_settings()
     processor = ReActProcessorAgent.create_from_settings(
         tool_registry=tool_registry,
         knowledge_tool=knowledge_tool,
@@ -111,6 +113,7 @@ async def lifespan(app: FastAPI):
     app.state.trace_manager = trace_manager
     app.state.tool_registry = tool_registry
     app.state.classifier = classifier
+    app.state.ticket_intent_agent = ticket_intent_agent
     app.state.processor = processor
     app.state.reviewer = reviewer
     app.state.coordinator = coordinator

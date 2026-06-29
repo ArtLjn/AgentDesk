@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactNode } from 'react'
+import { useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useTickets, useCreateTicket } from '@/hooks/useApi'
 import { Badge } from '@/components/ui/badge'
@@ -16,82 +16,111 @@ import {
 import { StatusBadge, CategoryBadge, PriorityBadge } from '@/components/layout/StatusBadge'
 import type { Ticket } from '@/types'
 import {
-  AlertTriangle, CheckCircle2, Clock3, FileText, LifeBuoy, Paperclip, Plus, RefreshCw, Search, Sparkles,
-  ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight,
+  Bot, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Loader2, Plus, RefreshCw, Search, SendHorizontal, Sparkles,
 } from 'lucide-react'
 
 const PAGE_SIZE_OPTIONS = [10, 20, 50]
 
-const ticketTypeOptions = [
-  { value: 'technical', label: '技术支持', hint: '系统故障、接口异常、权限问题' },
-  { value: 'billing', label: '账务问题', hint: '扣费、退款、账单核对' },
-  { value: 'complaint', label: '投诉建议', hint: '服务体验、处理不满意' },
-  { value: 'inquiry', label: '咨询问询', hint: '功能入口、操作方式、规则咨询' },
+const EXAMPLE_PROMPTS = [
+  '今天上午 10:15 开始后台一直 504，部分业务人员无法登录，请尽快恢复，联系 ops@example.com',
+  '上个月账单多扣了 200 元，已经核对订单记录，请帮我退款，手机号 13800000000',
+  '我找不到导出本月工单报表的入口，请告知在哪里操作',
 ]
 
-const priorityOptions = [
-  { value: 'P0', label: 'P0 紧急', hint: '核心业务不可用' },
-  { value: 'P1', label: 'P1 高', hint: '影响多人或关键流程' },
-  { value: 'P2', label: 'P2 普通', hint: '常规问题处理' },
-  { value: 'P3', label: 'P3 低', hint: '咨询、建议或低影响' },
-]
-
-const impactOptions = [
-  '仅本人受影响',
-  '部分用户受影响',
-  '全部用户受影响',
-  '核心业务不可用',
-]
-
-const sampleTickets = [
-  {
-    type: 'technical',
-    priority: 'P0',
-    impact: '核心业务不可用',
-    title: '数据库连接超时导致系统无法访问',
-    detail: '从今天上午 10:15 开始，后台登录后页面一直加载，接口偶发返回 504，业务人员无法查看客户数据。',
-    expectation: '请优先恢复系统访问，并说明是否需要回滚最近发布。',
-    contact: '张三 13800000000',
-  },
-  {
-    type: 'billing',
-    priority: 'P1',
-    impact: '仅本人受影响',
-    title: '账单金额异常，多扣 200 元',
-    detail: '上个月套餐应为 399 元，实际账单显示扣费 599 元，已经核对过订单记录。',
-    expectation: '请协助核对账单并发起退款。',
-    contact: 'finance@example.com',
-  },
-  {
-    type: 'inquiry',
-    priority: 'P3',
-    impact: '仅本人受影响',
-    title: '找不到导出 Excel 报表入口',
-    detail: '需要导出本月工单处理报表，但在工单列表和详情页都没有看到导出按钮。',
-    expectation: '请告知具体入口或需要开通的权限。',
-    contact: 'U001',
-  },
-]
-
-function optionLabel(options: Array<{ value: string; label: string }>, value: string) {
-  return options.find(option => option.value === value)?.label ?? value
+interface AgentTicketComposerProps {
+  compact?: boolean
+  onCreated?: () => void
 }
 
-function FormField({
-  label,
-  hint,
-  children,
-}: {
-  label: string
-  hint?: string
-  children: ReactNode
-}) {
+function AgentTicketComposer({ compact = false, onCreated }: AgentTicketComposerProps) {
+  const [userId, setUserId] = useState('U001')
+  const [content, setContent] = useState('')
+  const createMutation = useCreateTicket()
+
+  const canSubmit = content.trim().length >= 8 && !createMutation.isPending
+
+  const handleSubmit = async () => {
+    if (!canSubmit) return
+    await createMutation.mutateAsync({
+      content: content.trim(),
+      user_id: userId.trim() || undefined,
+    })
+    setContent('')
+    onCreated?.()
+  }
+
+  const loadExample = () => {
+    const next = EXAMPLE_PROMPTS[Math.floor(Math.random() * EXAMPLE_PROMPTS.length)]
+    setContent(next)
+  }
+
   return (
-    <label className="block space-y-1.5">
-      <span className="text-xs font-medium text-muted-foreground">{label}</span>
-      {children}
-      {hint && <span className="block text-[11px] leading-4 text-muted-foreground/75">{hint}</span>}
-    </label>
+    <div className={compact ? 'space-y-4' : 'rounded-xl border border-border bg-card p-4 shadow-sm'}>
+      {!compact && (
+        <div className="mb-4 flex items-start justify-between gap-4">
+          <div className="flex items-start gap-3">
+            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-primary/15 text-primary">
+              <Bot className="h-5 w-5" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <h3 className="text-sm font-semibold">AI 创建工单</h3>
+                <Badge variant="outline" className="border-primary/30 bg-primary/10 text-[10px] text-primary">
+                  Agent 理解
+                </Badge>
+              </div>
+              <p className="mt-1 text-xs text-muted-foreground">
+                直接描述问题，后端 Agent 会自动提取类型、优先级、影响范围和联系方式。
+              </p>
+            </div>
+          </div>
+          <Button variant="outline" size="sm" onClick={loadExample} type="button">
+            <Sparkles className="h-3.5 w-3.5" />
+            示例
+          </Button>
+        </div>
+      )}
+
+      <div className="grid gap-3 lg:grid-cols-[140px_1fr_auto]">
+        <Input
+          value={userId}
+          onChange={(e) => setUserId(e.target.value)}
+          placeholder="用户 ID"
+          className="h-9"
+        />
+        <Textarea
+          value={content}
+          onChange={(e) => setContent(e.target.value)}
+          placeholder="例如：今天上午 10:15 开始后台一直 504，部分业务人员无法登录，请尽快恢复，联系 ops@example.com"
+          rows={compact ? 5 : 2}
+          className="min-h-[72px] resize-none"
+        />
+        <div className="flex items-end gap-2 lg:flex-col lg:justify-end">
+          {compact && (
+            <Button variant="outline" onClick={loadExample} type="button">
+              <Sparkles className="h-3.5 w-3.5" />
+              填入示例
+            </Button>
+          )}
+          <Button onClick={handleSubmit} disabled={!canSubmit} className={compact ? 'min-w-28' : 'min-w-24'}>
+            {createMutation.isPending ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <SendHorizontal className="h-3.5 w-3.5" />
+            )}
+            {createMutation.isPending ? '创建中' : '创建'}
+          </Button>
+        </div>
+      </div>
+
+      <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
+        <span>Agent 将自动生成：</span>
+        <Badge variant="secondary" className="text-[10px]">问题标题</Badge>
+        <Badge variant="secondary" className="text-[10px]">分类</Badge>
+        <Badge variant="secondary" className="text-[10px]">优先级</Badge>
+        <Badge variant="secondary" className="text-[10px]">影响范围</Badge>
+      </div>
+    </div>
   )
 }
 
@@ -103,22 +132,12 @@ export function Tickets() {
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(10)
   const [dialogOpen, setDialogOpen] = useState(false)
-  const [newUserId, setNewUserId] = useState('U001')
-  const [newType, setNewType] = useState('technical')
-  const [newPriority, setNewPriority] = useState('P2')
-  const [newImpact, setNewImpact] = useState('仅本人受影响')
-  const [newTitle, setNewTitle] = useState('')
-  const [newDetail, setNewDetail] = useState('')
-  const [newExpectation, setNewExpectation] = useState('')
-  const [newContact, setNewContact] = useState('')
-  const [newOccurredAt, setNewOccurredAt] = useState('')
 
   const params: Record<string, string> = {}
   if (status) params.status = status
   if (category) params.category = category
 
   const { data: tickets = [], isLoading, refetch } = useTickets(params)
-  const createMutation = useCreateTicket()
 
   const filtered = useMemo(() => {
     if (!search) return tickets
@@ -143,272 +162,52 @@ export function Tickets() {
     return Array.from({ length: max }, (_, i) => start + i)
   }, [currentPage, totalPages])
 
-  const resetCreateForm = () => {
-    setNewType('technical')
-    setNewPriority('P2')
-    setNewImpact('仅本人受影响')
-    setNewTitle('')
-    setNewDetail('')
-    setNewExpectation('')
-    setNewContact('')
-    setNewOccurredAt('')
-  }
-
-  const buildTicketContent = () => {
-    const rows = [
-      `【问题类型】${optionLabel(ticketTypeOptions, newType)}`,
-      `【紧急程度】${optionLabel(priorityOptions, newPriority)}`,
-      `【影响范围】${newImpact}`,
-      `【问题标题】${newTitle.trim()}`,
-      `【问题描述】${newDetail.trim()}`,
-      newExpectation.trim() ? `【期望处理】${newExpectation.trim()}` : '',
-      newOccurredAt.trim() ? `【发生时间】${newOccurredAt.trim()}` : '',
-      newContact.trim() ? `【联系方式】${newContact.trim()}` : '',
-    ]
-
-    return rows.filter(Boolean).join('\n')
-  }
-
-  const handleCreate = async () => {
-    if (!newTitle.trim() || !newDetail.trim()) return
-    await createMutation.mutateAsync({ content: buildTicketContent(), user_id: newUserId || undefined })
-    resetCreateForm()
+  const handleCreatedFromDialog = () => {
     setDialogOpen(false)
     refetch()
   }
-
-  const loadSample = () => {
-    const sample = sampleTickets[Math.floor(Math.random() * sampleTickets.length)]
-    setNewType(sample.type)
-    setNewPriority(sample.priority)
-    setNewImpact(sample.impact)
-    setNewTitle(sample.title)
-    setNewDetail(sample.detail)
-    setNewExpectation(sample.expectation)
-    setNewContact(sample.contact)
-  }
-
-  const canCreate = newTitle.trim().length > 0 && newDetail.trim().length > 0 && !createMutation.isPending
-  const previewContent = buildTicketContent()
 
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-xl font-semibold">工单管理</h2>
-          <p className="text-sm text-muted-foreground mt-1">管理和追踪所有工单</p>
+          <p className="mt-1 text-sm text-muted-foreground">管理和追踪所有工单</p>
         </div>
         <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-          <DialogTrigger
-            render={<Button size="sm" />}
-          >
-            <Plus className="w-4 h-4 mr-1.5" />
+          <DialogTrigger render={<Button size="sm" />}>
+            <Plus className="h-4 w-4" />
             提交工单
           </DialogTrigger>
-          <DialogContent className="max-h-[90vh] overflow-y-auto border-border bg-card p-0 sm:max-w-[760px]">
-            <DialogHeader className="border-b border-border bg-muted/20 px-6 py-5">
+          <DialogContent className="border-border bg-card sm:max-w-[680px]">
+            <DialogHeader>
               <div className="flex items-start gap-3 pr-8">
                 <div className="mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-primary/15 text-primary">
-                  <LifeBuoy className="h-5 w-5" />
+                  <Bot className="h-5 w-5" />
                 </div>
                 <div className="space-y-1">
-                  <DialogTitle className="text-lg">提交新工单</DialogTitle>
+                  <DialogTitle>AI 提交工单</DialogTitle>
                   <DialogDescription>
-                    补充关键信息后，系统会自动分类、判断优先级并进入处理流程。
+                    不需要填写传统表单，直接说清楚问题即可。
                   </DialogDescription>
                 </div>
               </div>
             </DialogHeader>
-            <div className="grid gap-5 px-6 py-5 lg:grid-cols-[1fr_220px]">
-              <div className="space-y-5">
-                <section className="space-y-3">
-                  <div className="flex items-center gap-2">
-                    <FileText className="h-4 w-4 text-primary" />
-                    <h3 className="text-sm font-semibold">基础信息</h3>
-                  </div>
-                  <div className="grid gap-3 sm:grid-cols-2">
-                    <FormField label="用户 ID" hint="可留空，留空时按匿名工单处理">
-                      <Input value={newUserId} onChange={(e) => setNewUserId(e.target.value)} placeholder="例如 U001" />
-                    </FormField>
-                    <FormField label="问题类型">
-                      <Select value={newType} onValueChange={(v) => setNewType(v ?? 'technical')}>
-                        <SelectTrigger>
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent className="bg-popover border-border">
-                          {ticketTypeOptions.map(option => (
-                            <SelectItem key={option.value} value={option.value}>
-                              <span className="flex flex-col gap-0.5">
-                                <span>{option.label}</span>
-                                <span className="text-[11px] text-muted-foreground">{option.hint}</span>
-                              </span>
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                    </FormField>
-                    <FormField label="紧急程度">
-                      <div className="grid grid-cols-2 gap-2">
-                        {priorityOptions.map(option => (
-                          <button
-                            key={option.value}
-                            type="button"
-                            onClick={() => setNewPriority(option.value)}
-                            className={`rounded-lg border px-3 py-2 text-left transition-colors ${
-                              newPriority === option.value
-                                ? 'border-primary bg-primary/15 text-primary'
-                                : 'border-border bg-muted/20 text-foreground hover:bg-muted/40'
-                            }`}
-                          >
-                            <span className="block text-xs font-semibold">{option.label}</span>
-                            <span className="mt-0.5 block text-[11px] leading-4 text-muted-foreground">{option.hint}</span>
-                          </button>
-                        ))}
-                      </div>
-                    </FormField>
-                    <FormField label="影响范围">
-                      <Select value={newImpact} onValueChange={(v) => setNewImpact(v ?? '仅本人受影响')}>
-                        <SelectTrigger>
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent className="bg-popover border-border">
-                          {impactOptions.map(option => (
-                            <SelectItem key={option} value={option}>{option}</SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                    </FormField>
-                  </div>
-                </section>
-
-                <section className="space-y-3">
-                  <div className="flex items-center gap-2">
-                    <AlertTriangle className="h-4 w-4 text-warning" />
-                    <h3 className="text-sm font-semibold">问题描述</h3>
-                    <Badge variant="outline" className="border-primary/30 bg-primary/10 text-[10px] text-primary">
-                      必填
-                    </Badge>
-                  </div>
-                  <FormField label="问题标题">
-                    <Input
-                      value={newTitle}
-                      onChange={(e) => setNewTitle(e.target.value)}
-                      placeholder="用一句话说明问题，例如：API 返回 403 导致数据同步失败"
-                    />
-                  </FormField>
-                  <FormField label="详细描述" hint="建议写清楚现象、复现步骤、报错信息和已尝试的处理方式">
-                    <Textarea
-                      value={newDetail}
-                      onChange={(e) => setNewDetail(e.target.value)}
-                      placeholder="请描述你遇到的问题..."
-                      rows={5}
-                      className="min-h-[120px]"
-                    />
-                  </FormField>
-                  <FormField label="期望处理结果">
-                    <Input
-                      value={newExpectation}
-                      onChange={(e) => setNewExpectation(e.target.value)}
-                      placeholder="例如：恢复访问、核对账单、告知操作入口"
-                    />
-                  </FormField>
-                </section>
-
-                <section className="space-y-3">
-                  <div className="flex items-center gap-2">
-                    <Clock3 className="h-4 w-4 text-muted-foreground" />
-                    <h3 className="text-sm font-semibold">辅助信息</h3>
-                  </div>
-                  <div className="grid gap-3 sm:grid-cols-2">
-                    <FormField label="联系方式">
-                      <Input
-                        value={newContact}
-                        onChange={(e) => setNewContact(e.target.value)}
-                        placeholder="手机号、邮箱或企业微信"
-                      />
-                    </FormField>
-                    <FormField label="发生时间">
-                      <Input
-                        value={newOccurredAt}
-                        onChange={(e) => setNewOccurredAt(e.target.value)}
-                        placeholder="例如 今天 10:15"
-                      />
-                    </FormField>
-                  </div>
-                  <div className="rounded-lg border border-dashed border-border bg-muted/20 p-4">
-                    <div className="flex items-center gap-3">
-                      <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-background text-muted-foreground">
-                        <Paperclip className="h-4 w-4" />
-                      </div>
-                      <div>
-                        <p className="text-sm font-medium">附件材料</p>
-                        <p className="mt-0.5 text-xs text-muted-foreground">当前接口暂未接入附件上传，可先在描述中补充截图链接或日志片段。</p>
-                      </div>
-                    </div>
-                  </div>
-                </section>
-              </div>
-
-              <aside className="space-y-3">
-                <div className="rounded-lg border border-border bg-muted/20 p-4">
-                  <div className="flex items-center gap-2 text-sm font-semibold">
-                    <Sparkles className="h-4 w-4 text-primary" />
-                    提交后流程
-                  </div>
-                  <div className="mt-4 space-y-3">
-                    {['接收工单', 'Agent 自动分类', '生成处理方案', '必要时人工审核'].map((step, index) => (
-                      <div key={step} className="flex items-center gap-2 text-xs text-muted-foreground">
-                        <span className="flex h-5 w-5 items-center justify-center rounded-full bg-primary/15 text-[10px] font-semibold text-primary">
-                          {index + 1}
-                        </span>
-                        <span>{step}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-                <div className="rounded-lg border border-border bg-background/60 p-4">
-                  <div className="mb-3 flex items-center gap-2 text-sm font-semibold">
-                    <CheckCircle2 className="h-4 w-4 text-success" />
-                    提交摘要
-                  </div>
-                  <div className="space-y-2 text-xs text-muted-foreground">
-                    <div className="flex justify-between gap-3">
-                      <span>类型</span>
-                      <span className="text-foreground">{optionLabel(ticketTypeOptions, newType)}</span>
-                    </div>
-                    <div className="flex justify-between gap-3">
-                      <span>优先级</span>
-                      <span className="text-foreground">{optionLabel(priorityOptions, newPriority)}</span>
-                    </div>
-                    <div className="flex justify-between gap-3">
-                      <span>影响</span>
-                      <span className="text-right text-foreground">{newImpact}</span>
-                    </div>
-                  </div>
-                  <div className="mt-3 max-h-32 overflow-hidden rounded-md border border-border bg-muted/20 p-3 text-[11px] leading-5 text-muted-foreground">
-                    {previewContent || '填写标题和描述后，这里会预览提交给处理 Agent 的结构化内容。'}
-                  </div>
-                </div>
-              </aside>
-            </div>
-            <DialogFooter className="mx-0 mb-0 rounded-none border-border bg-muted/20 px-6 py-4">
-              <Button variant="outline" onClick={loadSample} type="button">
-                填入示例
-              </Button>
-              <Button onClick={handleCreate} disabled={!canCreate}>
-                {createMutation.isPending ? '提交中...' : '提交工单'}
-              </Button>
+            <AgentTicketComposer compact onCreated={handleCreatedFromDialog} />
+            <DialogFooter className="border-t border-border pt-4 text-xs text-muted-foreground">
+              后端 Agent 会先理解意图，再创建并分派工单。
             </DialogFooter>
           </DialogContent>
         </Dialog>
       </div>
 
-      {/* 过滤栏 */}
-      <Card className="bg-card border-border">
+      <AgentTicketComposer onCreated={() => refetch()} />
+
+      <Card className="border-border bg-card">
         <CardContent className="p-3">
-          <div className="flex gap-3 items-center">
-            <div className="relative flex-1 max-w-xs">
-              <Search className="absolute left-2.5 top-2.5 w-3.5 h-3.5 text-muted-foreground" />
+          <div className="flex items-center gap-3">
+            <div className="relative max-w-xs flex-1">
+              <Search className="absolute left-2.5 top-2.5 h-3.5 w-3.5 text-muted-foreground" />
               <Input
                 placeholder="搜索工单..."
                 value={search}
@@ -416,7 +215,7 @@ export function Tickets() {
                   setSearch(e.target.value)
                   setPage(1)
                 }}
-                className="pl-8 h-8 text-sm"
+                className="h-8 pl-8 text-sm"
               />
             </div>
             <Select
@@ -426,10 +225,10 @@ export function Tickets() {
                 setPage(1)
               }}
             >
-              <SelectTrigger className="w-32 h-8 text-sm">
+              <SelectTrigger className="h-8 w-32 text-sm">
                 <SelectValue placeholder="全部状态" />
               </SelectTrigger>
-              <SelectContent className="bg-popover border-border">
+              <SelectContent className="border-border bg-popover">
                 <SelectItem value="all">全部状态</SelectItem>
                 <SelectItem value="received">已接收</SelectItem>
                 <SelectItem value="classifying">分类中</SelectItem>
@@ -446,10 +245,10 @@ export function Tickets() {
                 setPage(1)
               }}
             >
-              <SelectTrigger className="w-32 h-8 text-sm">
+              <SelectTrigger className="h-8 w-32 text-sm">
                 <SelectValue placeholder="全部分类" />
               </SelectTrigger>
-              <SelectContent className="bg-popover border-border">
+              <SelectContent className="border-border bg-popover">
                 <SelectItem value="all">全部分类</SelectItem>
                 <SelectItem value="technical">技术支持</SelectItem>
                 <SelectItem value="billing">账务问题</SelectItem>
@@ -458,25 +257,24 @@ export function Tickets() {
               </SelectContent>
             </Select>
             <Button variant="outline" size="sm" onClick={() => refetch()}>
-              <RefreshCw className="w-3.5 h-3.5 mr-1" />
+              <RefreshCw className="h-3.5 w-3.5" />
               刷新
             </Button>
           </div>
         </CardContent>
       </Card>
 
-      {/* 工单表格 */}
-      <Card className="bg-card border-border overflow-hidden">
+      <Card className="overflow-hidden border-border bg-card">
         <Table>
           <TableHeader>
             <TableRow className="border-border hover:bg-transparent">
-              <TableHead className="text-muted-foreground text-xs font-medium h-11 px-4 w-[160px]">工单 ID</TableHead>
-              <TableHead className="text-muted-foreground text-xs font-medium h-11 px-4">内容</TableHead>
-              <TableHead className="text-muted-foreground text-xs font-medium h-11 px-4 w-[110px]">分类</TableHead>
-              <TableHead className="text-muted-foreground text-xs font-medium h-11 px-4 w-[90px]">优先级</TableHead>
-              <TableHead className="text-muted-foreground text-xs font-medium h-11 px-4 w-[120px]">状态</TableHead>
-              <TableHead className="text-muted-foreground text-xs font-medium h-11 px-4 text-right w-[80px]">评分</TableHead>
-              <TableHead className="text-muted-foreground text-xs font-medium h-11 px-4 text-right w-[150px]">创建时间</TableHead>
+              <TableHead className="h-11 w-[160px] px-4 text-xs font-medium text-muted-foreground">工单 ID</TableHead>
+              <TableHead className="h-11 px-4 text-xs font-medium text-muted-foreground">内容</TableHead>
+              <TableHead className="h-11 w-[110px] px-4 text-xs font-medium text-muted-foreground">分类</TableHead>
+              <TableHead className="h-11 w-[90px] px-4 text-xs font-medium text-muted-foreground">优先级</TableHead>
+              <TableHead className="h-11 w-[120px] px-4 text-xs font-medium text-muted-foreground">状态</TableHead>
+              <TableHead className="h-11 w-[80px] px-4 text-right text-xs font-medium text-muted-foreground">评分</TableHead>
+              <TableHead className="h-11 w-[150px] px-4 text-right text-xs font-medium text-muted-foreground">创建时间</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -484,15 +282,15 @@ export function Tickets() {
               Array.from({ length: pageSize }).map((_, i) => (
                 <TableRow key={i} className="border-border">
                   {Array.from({ length: 7 }).map((_, j) => (
-                    <TableCell key={j} className="py-3 px-4">
-                      <div className="h-4 w-24 bg-muted rounded animate-pulse" />
+                    <TableCell key={j} className="px-4 py-3">
+                      <div className="h-4 w-24 animate-pulse rounded bg-muted" />
                     </TableCell>
                   ))}
                 </TableRow>
               ))
             ) : pageItems.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={7} className="text-center text-muted-foreground py-16 text-sm">
+                <TableCell colSpan={7} className="py-16 text-center text-sm text-muted-foreground">
                   暂无工单数据
                 </TableCell>
               </TableRow>
@@ -500,18 +298,18 @@ export function Tickets() {
               pageItems.map((ticket: Ticket) => (
                 <TableRow
                   key={ticket.ticket_id}
-                  className="border-border cursor-pointer hover:bg-muted/40 transition-colors"
+                  className="cursor-pointer border-border transition-colors hover:bg-muted/40"
                   onClick={() => navigate(`/tickets/${ticket.ticket_id}`)}
                 >
-                  <TableCell className="font-mono text-[12px] text-primary py-3 px-4">{ticket.ticket_id?.slice(0, 16)}</TableCell>
-                  <TableCell className="max-w-[420px] truncate text-[13px] py-3 px-4">{ticket.content}</TableCell>
-                  <TableCell className="py-3 px-4">{ticket.category ? <CategoryBadge category={ticket.category} /> : '-'}</TableCell>
-                  <TableCell className="py-3 px-4">{ticket.priority ? <PriorityBadge priority={ticket.priority} /> : '-'}</TableCell>
-                  <TableCell className="py-3 px-4"><StatusBadge status={ticket.status} /></TableCell>
-                  <TableCell className="font-mono text-[12px] py-3 px-4 text-right tabular-nums">
+                  <TableCell className="px-4 py-3 font-mono text-[12px] text-primary">{ticket.ticket_id?.slice(0, 16)}</TableCell>
+                  <TableCell className="max-w-[420px] truncate px-4 py-3 text-[13px]">{ticket.content}</TableCell>
+                  <TableCell className="px-4 py-3">{ticket.category ? <CategoryBadge category={ticket.category} /> : '-'}</TableCell>
+                  <TableCell className="px-4 py-3">{ticket.priority ? <PriorityBadge priority={ticket.priority} /> : '-'}</TableCell>
+                  <TableCell className="px-4 py-3"><StatusBadge status={ticket.status} /></TableCell>
+                  <TableCell className="px-4 py-3 text-right font-mono text-[12px] tabular-nums">
                     {ticket.review_score != null ? ticket.review_score.toFixed(2) : '-'}
                   </TableCell>
-                  <TableCell className="text-[12px] text-muted-foreground py-3 px-4 text-right tabular-nums">
+                  <TableCell className="px-4 py-3 text-right text-[12px] tabular-nums text-muted-foreground">
                     {ticket.created_at ? new Date(ticket.created_at).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '-'}
                   </TableCell>
                 </TableRow>
@@ -520,9 +318,8 @@ export function Tickets() {
           </TableBody>
         </Table>
 
-        {/* 分页栏 */}
-        <div className="flex items-center justify-between gap-4 px-4 py-3 border-t border-border bg-muted/20">
-          <div className="text-xs text-muted-foreground tabular-nums">
+        <div className="flex items-center justify-between gap-4 border-t border-border bg-muted/20 px-4 py-3">
+          <div className="text-xs tabular-nums text-muted-foreground">
             {total === 0 ? '共 0 条' : `第 ${startIdx + 1}-${endIdx} 条，共 ${total} 条`}
           </div>
           <div className="flex items-center gap-1">
@@ -587,10 +384,10 @@ export function Tickets() {
                 setPage(1)
               }}
             >
-              <SelectTrigger className="w-[70px] h-8 text-xs">
+              <SelectTrigger className="h-8 w-[70px] text-xs">
                 <SelectValue />
               </SelectTrigger>
-              <SelectContent className="bg-popover border-border">
+              <SelectContent className="border-border bg-popover">
                 {PAGE_SIZE_OPTIONS.map(n => (
                   <SelectItem key={n} value={String(n)}>{n}</SelectItem>
                 ))}
