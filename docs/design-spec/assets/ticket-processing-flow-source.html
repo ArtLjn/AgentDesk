@@ -3,15 +3,13 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>AgentDesk 智能工单处理流程图</title>
+  <title>AgentDesk 智能工单处理核心流程图</title>
   <style>
-    * {
-      box-sizing: border-box;
-    }
+    * { box-sizing: border-box; }
 
     body {
       margin: 0;
-      background: #eef3f8;
+      background: #eef4fb;
       font-family: "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif;
       color: #162033;
     }
@@ -21,10 +19,7 @@
       width: 2400px;
       height: 1350px;
       overflow: hidden;
-      background:
-        radial-gradient(circle at 15% 18%, rgba(47, 129, 247, 0.12), transparent 28%),
-        radial-gradient(circle at 88% 10%, rgba(6, 182, 212, 0.12), transparent 24%),
-        linear-gradient(135deg, #f8fbff 0%, #edf3f9 48%, #f7fbfc 100%);
+      background: linear-gradient(135deg, #f8fbff 0%, #edf5fb 58%, #f8fbff 100%);
     }
 
     .title {
@@ -34,8 +29,7 @@
       top: 38px;
       text-align: center;
       font-size: 44px;
-      font-weight: 800;
-      letter-spacing: 0;
+      font-weight: 850;
       color: #102033;
     }
 
@@ -43,100 +37,57 @@
       position: absolute;
       left: 0;
       right: 0;
-      top: 96px;
+      top: 98px;
       text-align: center;
       font-size: 20px;
-      font-weight: 500;
+      font-weight: 650;
       color: #607086;
     }
 
-    .system-box {
+    .stage {
       position: absolute;
-      left: 165px;
-      top: 150px;
-      width: 2070px;
-      height: 1030px;
-      border: 2px dashed #8fa3b8;
-      border-radius: 26px;
-      background: rgba(255, 255, 255, 0.58);
-      box-shadow: 0 22px 70px rgba(26, 50, 78, 0.12);
+      border: 2px solid rgba(87, 110, 133, 0.24);
+      border-radius: 24px;
+      background: rgba(255, 255, 255, 0.84);
+      box-shadow: 0 20px 54px rgba(25, 45, 70, 0.10);
     }
 
-    .system-label {
-      position: absolute;
-      left: 190px;
-      top: 126px;
-      padding: 8px 18px;
-      border-radius: 999px;
-      background: #102033;
-      color: #ffffff;
-      font-size: 20px;
-      font-weight: 700;
-    }
-
-    .lane {
-      position: absolute;
-      border: 1px solid rgba(113, 132, 153, 0.35);
-      border-radius: 18px;
-      background: rgba(255, 255, 255, 0.72);
-      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.9);
-    }
-
-    .lane h2 {
+    .stage h2 {
       margin: 0;
-      padding: 14px 20px 10px;
-      font-size: 22px;
-      line-height: 1.2;
-      font-weight: 800;
+      padding: 18px 22px 0;
+      font-size: 24px;
+      font-weight: 850;
       color: #203047;
     }
 
-    .lane .hint {
+    .stage .desc {
       position: absolute;
-      right: 18px;
-      top: 14px;
+      left: 22px;
+      top: 52px;
       font-size: 15px;
       font-weight: 700;
-      color: #728198;
+      color: #77869a;
     }
 
-    .user-lane { left: 205px; top: 210px; width: 410px; height: 890px; background: #f5f0ff; }
-    .api-lane { left: 655px; top: 210px; width: 410px; height: 890px; background: #eff8ff; }
-    .graph-lane { left: 1105px; top: 210px; width: 690px; height: 890px; background: #f1fbf5; }
-    .review-lane { left: 1835px; top: 210px; width: 360px; height: 890px; background: #fff7ed; }
-
-    .data-band {
-      position: absolute;
-      left: 205px;
-      top: 1120px;
-      width: 1990px;
-      height: 150px;
-      border: 1px solid rgba(113, 132, 153, 0.35);
-      border-radius: 20px;
-      background: rgba(236, 244, 255, 0.9);
-    }
-
-    .data-band h2 {
-      margin: 0;
-      padding: 14px 18px 0;
-      font-size: 22px;
-      font-weight: 800;
-    }
+    .s-main { left: 80px; top: 160px; width: 2240px; height: 545px; background: #f1fbf5; }
+    .s-human { left: 80px; top: 745px; width: 2240px; height: 330px; background: #fff7ed; }
+    .s-data { left: 80px; top: 1115px; width: 2240px; height: 150px; background: #eef6ff; }
 
     .node {
       position: absolute;
+      z-index: 3;
       display: flex;
       flex-direction: column;
       justify-content: center;
-      min-height: 76px;
-      padding: 13px 16px;
+      min-height: 80px;
+      padding: 13px 14px;
       border: 2px solid #274c77;
-      border-radius: 14px;
+      border-radius: 16px;
       background: #ffffff;
-      box-shadow: 0 10px 24px rgba(27, 45, 70, 0.10);
+      box-shadow: 0 10px 24px rgba(27, 45, 70, 0.12);
       text-align: center;
-      font-weight: 700;
-      line-height: 1.28;
+      font-weight: 760;
+      line-height: 1.3;
     }
 
     .node .main {
@@ -145,37 +96,32 @@
     }
 
     .node .sub {
-      margin-top: 4px;
-      font-size: 14px;
+      margin-top: 5px;
+      font-size: 13px;
       color: #5d6b7f;
-      font-weight: 600;
+      font-weight: 620;
     }
 
-    .node.small .main {
-      font-size: 17px;
-    }
-
-    .node.small .sub {
-      font-size: 12px;
-    }
-
+    .node.small .main { font-size: 18px; }
+    .node.small .sub { font-size: 12px; }
     .node.purple { border-color: #7c3aed; background: #fbf8ff; }
     .node.blue { border-color: #2f81f7; background: #f6fbff; }
     .node.green { border-color: #16a34a; background: #f7fff9; }
     .node.orange { border-color: #ea580c; background: #fffaf5; }
-    .node.red { border-color: #dc2626; background: #fff7f7; }
-    .node.gray { border-color: #64748b; background: #f8fafc; }
 
     .decision {
       position: absolute;
-      width: 140px;
-      height: 140px;
+      z-index: 3;
+      width: 118px;
+      height: 118px;
       transform: rotate(45deg);
-      border: 2px solid #274c77;
-      border-radius: 16px;
-      background: #fff;
-      box-shadow: 0 10px 24px rgba(27, 45, 70, 0.10);
+      border: 2px solid #16a34a;
+      border-radius: 17px;
+      background: #ffffff;
+      box-shadow: 0 10px 24px rgba(27, 45, 70, 0.12);
     }
+
+    .decision.orange { border-color: #ea580c; }
 
     .decision .inner {
       position: absolute;
@@ -186,66 +132,87 @@
       padding: 14px;
       transform: rotate(-45deg);
       text-align: center;
-      font-size: 17px;
-      font-weight: 800;
-      line-height: 1.22;
+      font-size: 16px;
+      font-weight: 850;
+      line-height: 1.25;
       color: #172034;
     }
 
     .tag {
       position: absolute;
-      z-index: 4;
-      padding: 5px 10px;
+      z-index: 6;
+      padding: 6px 12px;
       border-radius: 999px;
-      background: #102033;
       color: #fff;
       font-size: 13px;
-      font-weight: 800;
+      font-weight: 850;
       white-space: nowrap;
-      box-shadow: 0 6px 14px rgba(16, 32, 51, 0.18);
+      box-shadow: 0 6px 16px rgba(16, 32, 51, 0.18);
     }
+
+    .tag.green { background: #15803d; }
+    .tag.orange { background: #ea580c; }
+    .tag.red { background: #dc2626; }
+    .tag.cyan { background: #0e9f9f; }
 
     .pill {
       position: absolute;
+      z-index: 3;
       display: flex;
       align-items: center;
       justify-content: center;
-      height: 42px;
-      padding: 0 16px;
-      border-radius: 999px;
-      border: 1px solid rgba(39, 76, 119, 0.45);
+      height: 54px;
+      padding: 0 18px;
+      border-radius: 16px;
+      border: 1px solid rgba(39, 76, 119, 0.40);
       background: #ffffff;
-      font-size: 15px;
-      font-weight: 800;
+      font-size: 16px;
+      font-weight: 850;
       color: #223047;
       box-shadow: 0 8px 18px rgba(27, 45, 70, 0.08);
       white-space: nowrap;
     }
 
+    .data-note {
+      position: absolute;
+      left: 1530px;
+      top: 1138px;
+      width: 700px;
+      font-size: 15px;
+      font-weight: 700;
+      color: #607086;
+      text-align: right;
+    }
+
     .legend {
       position: absolute;
-      right: 218px;
-      top: 126px;
+      left: 120px;
+      bottom: 48px;
       display: flex;
-      gap: 10px;
+      gap: 30px;
       align-items: center;
-      font-size: 15px;
-      color: #607086;
-      font-weight: 700;
+      font-size: 16px;
+      color: #516174;
+      font-weight: 800;
     }
 
     .legend span {
       display: inline-flex;
       align-items: center;
-      gap: 5px;
+      gap: 9px;
     }
 
-    .dot {
-      width: 11px;
-      height: 11px;
-      border-radius: 50%;
+    .legend-line {
       display: inline-block;
+      width: 54px;
+      height: 0;
+      border-top: 4px solid #28506f;
+      border-radius: 999px;
     }
+
+    .legend-line.red { border-color: #dc2626; }
+    .legend-line.orange { border-color: #ea580c; }
+    .legend-line.cyan { border-color: #0ea5a5; }
 
     svg {
       position: absolute;
@@ -260,188 +227,190 @@
     .arrow {
       fill: none;
       stroke: #28506f;
-      stroke-width: 3;
-      stroke-linecap: round;
-      stroke-linejoin: round;
+      stroke-width: 4.5;
+      stroke-linecap: square;
+      stroke-linejoin: miter;
       marker-end: url(#arrow);
     }
 
-    .arrow.secondary {
-      stroke: #64748b;
-      stroke-dasharray: 9 8;
-      marker-end: url(#arrowSecondary);
+    .arrow.red {
+      stroke: #dc2626;
+      stroke-width: 4;
+      marker-end: url(#arrowRed);
     }
 
-    .arrow.highlight {
+    .arrow.human {
+      stroke: #ea580c;
+      stroke-width: 4;
+      marker-end: url(#arrowHuman);
+    }
+
+    .arrow.recover {
       stroke: #0ea5a5;
       stroke-width: 4;
-      marker-end: url(#arrowHighlight);
+      marker-end: url(#arrowRecover);
+    }
+
+    .route-channel {
+      fill: none;
+      stroke: rgba(234, 88, 12, 0.16);
+      stroke-width: 9;
+      stroke-linejoin: miter;
+      stroke-linecap: square;
     }
   </style>
 </head>
 <body>
   <div class="canvas">
-    <div class="title">AgentDesk 智能工单处理系统实现逻辑流程图</div>
-    <div class="subtitle">AI 处理主链路 · 人工审核闭环 · 用户二次补充恢复 · Trace 全程可观测</div>
-    <div class="system-box"></div>
-    <div class="system-label">AI Agent Ticket System</div>
-    <div class="legend">
-      <span><i class="dot" style="background:#2f81f7"></i>接口调用</span>
-      <span><i class="dot" style="background:#16a34a"></i>自动处理</span>
-      <span><i class="dot" style="background:#ea580c"></i>人工介入</span>
-      <span><i class="dot" style="background:#0ea5a5"></i>用户补充恢复</span>
+    <div class="title">AgentDesk 智能工单处理核心流程图</div>
+    <div class="subtitle">主流程横向推进 · Reviewer 只打回可修正问题 · 人工审核处理例外场景 · 用户补充后回到处理节点</div>
+
+    <div class="stage s-main">
+      <h2>1. 自动处理主链路</h2>
+      <div class="desc">从工单创建到 Agent 处理、质量门禁和最终归档</div>
+    </div>
+    <div class="stage s-human">
+      <h2>2. 人工审核与用户补充闭环</h2>
+      <div class="desc">高风险、投诉、重试超限、用户不满意时进入人工接管</div>
+    </div>
+    <div class="stage s-data">
+      <h2>3. 数据、知识与可观测底座</h2>
+      <div class="desc">运行状态、审核记录、补充消息、知识检索和 Trace 统一沉淀</div>
     </div>
 
-    <div class="lane user-lane"><h2>用户与前端层</h2><div class="hint">React SPA</div></div>
-    <div class="lane api-lane"><h2>接口与事件层</h2><div class="hint">FastAPI</div></div>
-    <div class="lane graph-lane"><h2>LangGraph 主流程</h2><div class="hint">多 Agent 编排</div></div>
-    <div class="lane review-lane"><h2>人工审核与补充</h2><div class="hint">Human in Loop</div></div>
-    <div class="data-band"><h2>数据、知识与可观测底座</h2></div>
+    <div class="node purple" style="left:120px;top:292px;width:170px;">
+      <div class="main">用户提交</div>
+      <div class="sub">自然语言问题</div>
+    </div>
+    <div class="node blue" style="left:335px;top:292px;width:180px;">
+      <div class="main">创建工单</div>
+      <div class="sub">POST /api/tickets</div>
+    </div>
+    <div class="node blue" style="left:560px;top:292px;width:180px;">
+      <div class="main">意图理解</div>
+      <div class="sub">标题 / 分类 / 风险</div>
+    </div>
+    <div class="node blue" style="left:785px;top:292px;width:180px;">
+      <div class="main">入库建 Trace</div>
+      <div class="sub">tickets + trace_id</div>
+    </div>
+    <div class="node green" style="left:1010px;top:292px;width:185px;">
+      <div class="main">接收分类</div>
+      <div class="sub">receive + classify</div>
+    </div>
+    <div class="decision" style="left:1255px;top:272px;"><div class="inner">是否<br>升级？</div></div>
 
-    <div class="node purple" style="left:250px;top:300px;width:280px;">
-      <div class="main">用户提交工单</div>
-      <div class="sub">自然语言描述 / user_id</div>
+    <div class="node green" style="left:780px;top:510px;width:215px;">
+      <div class="main">工单处理</div>
+      <div class="sub">RAG / 工具 / 草稿</div>
     </div>
-    <div class="node purple" style="left:250px;top:500px;width:280px;">
-      <div class="main">工单详情页</div>
-      <div class="sub">查看状态、结果、Trace</div>
+    <div class="node green" style="left:1085px;top:510px;width:215px;">
+      <div class="main">质量审核</div>
+      <div class="sub">Reviewer 四维质检</div>
     </div>
-    <div class="node purple" style="left:250px;top:715px;width:280px;">
-      <div class="main">补充信息输入框</div>
-      <div class="sub">仅 waiting_user_input 显示</div>
+    <div class="decision" style="left:1370px;top:490px;"><div class="inner">质量门禁<br>通过？</div></div>
+    <div class="node green" style="left:1665px;top:510px;width:235px;">
+      <div class="main">通知并归档</div>
+      <div class="sub">通过后展示最终结果</div>
     </div>
-    <div class="node purple small" style="left:250px;top:910px;width:280px;">
-      <div class="main">用户反馈不满意</div>
-      <div class="sub">completed + satisfied=false</div>
-    </div>
-
-    <div class="node blue" style="left:710px;top:255px;width:300px;">
-      <div class="main">POST /api/tickets</div>
-      <div class="sub">创建工单并后台执行</div>
-    </div>
-    <div class="node blue" style="left:710px;top:405px;width:300px;">
-      <div class="main">TicketIntentAgent</div>
-      <div class="sub">标题 / 分类 / 风险 / 缺失字段</div>
-    </div>
-    <div class="node blue" style="left:710px;top:555px;width:300px;">
-      <div class="main">写入 tickets</div>
-      <div class="sub">status=received，创建 trace</div>
-    </div>
-    <div class="node blue" style="left:710px;top:720px;width:300px;">
-      <div class="main">POST /tickets/{id}/messages</div>
-      <div class="sub">用户补充消息接口</div>
-    </div>
-    <div class="node blue small" style="left:710px;top:910px;width:300px;">
-      <div class="main">WebSocket 推送</div>
-      <div class="sub">ticket_update / review_event</div>
+    <div class="node green small" style="left:1080px;top:620px;width:220px;">
+      <div class="main">重试检查</div>
+      <div class="sub">打回返工；超限转人工</div>
     </div>
 
-    <div class="node green small" style="left:1160px;top:255px;width:210px;">
-      <div class="main">receive</div>
-      <div class="sub">初始化状态</div>
+    <div class="node purple small" style="left:120px;top:872px;width:210px;">
+      <div class="main">用户不满意</div>
+      <div class="sub">completed + false</div>
     </div>
-    <div class="node green small" style="left:1435px;top:255px;width:210px;">
-      <div class="main">classify</div>
-      <div class="sub">分类 / 优先级</div>
+    <div class="node orange" style="left:430px;top:872px;width:220px;">
+      <div class="main">等待人工审核</div>
+      <div class="sub">human_review_wait</div>
     </div>
-    <div class="decision" style="left:1325px;top:405px;"><div class="inner">route<br>路由判断</div></div>
-    <div class="node green" style="left:1160px;top:610px;width:240px;">
-      <div class="main">process</div>
-      <div class="sub">RAG 检索 / 工具调用 / 生成</div>
-    </div>
-    <div class="node green" style="left:1530px;top:610px;width:220px;">
-      <div class="main">review</div>
-      <div class="sub">ReviewerAgent 评分</div>
-    </div>
-    <div class="decision" style="left:1395px;top:765px;"><div class="inner">评分达标？</div></div>
-    <div class="node green small" style="left:1160px;top:890px;width:210px;">
-      <div class="main">retry_check</div>
-      <div class="sub">未超限返回处理</div>
-    </div>
-    <div class="node green small" style="left:1530px;top:930px;width:220px;">
-      <div class="main">notify → complete</div>
-      <div class="sub">通知并归档 completed</div>
-    </div>
-
-    <div class="node orange" style="left:1880px;top:275px;width:260px;">
-      <div class="main">human_review_wait</div>
-      <div class="sub">生成 pending 审核单</div>
-    </div>
-    <div class="node orange" style="left:1880px;top:430px;width:260px;">
+    <div class="node orange" style="left:735px;top:872px;width:215px;">
       <div class="main">审核工作台</div>
-      <div class="sub">AI 建议 + 人工决策</div>
+      <div class="sub">AI 建议 + 人工判断</div>
     </div>
-    <div class="node orange small" style="left:1880px;top:590px;width:260px;">
-      <div class="main">通过 / 改写 / 重处理 / 驳回</div>
-      <div class="sub">approve / rewrite / reprocess / reject</div>
+    <div class="decision orange" style="left:1040px;top:852px;"><div class="inner">人工<br>决策</div></div>
+    <div class="node orange small" style="left:1325px;top:820px;width:235px;">
+      <div class="main">通过 / 改写 / 驳回</div>
+      <div class="sub">生成最终结论或结束</div>
     </div>
-    <div class="node orange" style="left:1880px;top:750px;width:260px;">
-      <div class="main">请求用户补充</div>
-      <div class="sub">decision=request_info</div>
+    <div class="node orange small" style="left:1325px;top:960px;width:235px;">
+      <div class="main">重处理 / 请求补充</div>
+      <div class="sub">reprocess / request_info</div>
     </div>
-    <div class="node orange small" style="left:1880px;top:905px;width:260px;">
-      <div class="main">waiting_user_input</div>
-      <div class="sub">工单暂停等待用户</div>
+    <div class="node orange small" style="left:1660px;top:960px;width:235px;">
+      <div class="main">用户补充信息</div>
+      <div class="sub">waiting_user_input</div>
     </div>
 
-    <div class="pill" style="left:300px;top:1182px;width:230px;">MySQL：tickets</div>
-    <div class="pill" style="left:560px;top:1182px;width:300px;">human_reviews：审核记录</div>
-    <div class="pill" style="left:890px;top:1182px;width:320px;">ticket_messages：补充沟通</div>
-    <div class="pill" style="left:1240px;top:1182px;width:260px;">traces / spans</div>
-    <div class="pill" style="left:1530px;top:1182px;width:260px;">Qdrant 知识库</div>
-    <div class="pill" style="left:1820px;top:1182px;width:260px;">LLM / Embedding</div>
+    <div class="pill" style="left:180px;top:1190px;width:250px;">MySQL：tickets</div>
+    <div class="pill" style="left:500px;top:1190px;width:315px;">human_reviews：审核记录</div>
+    <div class="pill" style="left:885px;top:1190px;width:330px;">ticket_messages：补充沟通</div>
+    <div class="pill" style="left:1285px;top:1190px;width:270px;">traces / spans</div>
+    <div class="data-note">所有节点统一记录状态、决策、耗时和知识命中，前端通过 WebSocket 与 Trace 实时观测。</div>
 
-    <div class="tag" style="left:1218px;top:515px;">普通工单</div>
-    <div class="tag" style="left:1630px;top:455px;">投诉 / P0 / 高风险 / 缺字段</div>
-    <div class="tag" style="left:1748px;top:690px;">重试超限</div>
-    <div class="tag" style="left:1598px;top:832px;">通过</div>
-    <div class="tag" style="left:1200px;top:820px;">不通过</div>
-    <div class="tag" style="left:1660px;top:1148px;">Trace 贯穿全链路</div>
+    <div class="tag green" style="left:1318px;top:426px;">普通工单</div>
+    <div class="tag orange" style="left:1430px;top:310px;">投诉 / P0 / 高风险 / 字段缺失</div>
+    <div class="tag green" style="left:1540px;top:526px;">通过</div>
+    <div class="tag red" style="left:1270px;top:585px;">打回返工</div>
+    <div class="tag orange" style="left:1305px;top:705px;">重试超限</div>
+    <div class="tag cyan" style="left:1675px;top:838px;">补充后恢复</div>
+
+    <div class="legend">
+      <span><i class="legend-line"></i>主流程</span>
+      <span><i class="legend-line red"></i>Reviewer 打回</span>
+      <span><i class="legend-line orange"></i>人工协作</span>
+      <span><i class="legend-line cyan"></i>补充恢复</span>
+    </div>
 
     <svg viewBox="0 0 2400 1350" aria-hidden="true">
       <defs>
-        <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
-          <path d="M1,1 L11,6 L1,11 Z" fill="#28506f"></path>
+        <marker id="arrow" markerWidth="11" markerHeight="11" refX="9" refY="5.5" orient="auto">
+          <path d="M1,1 L10,5.5 L1,10 Z" fill="#28506f"></path>
         </marker>
-        <marker id="arrowSecondary" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
-          <path d="M1,1 L11,6 L1,11 Z" fill="#64748b"></path>
+        <marker id="arrowRed" markerWidth="11" markerHeight="11" refX="9" refY="5.5" orient="auto">
+          <path d="M1,1 L10,5.5 L1,10 Z" fill="#dc2626"></path>
         </marker>
-        <marker id="arrowHighlight" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
-          <path d="M1,1 L11,6 L1,11 Z" fill="#0ea5a5"></path>
+        <marker id="arrowHuman" markerWidth="11" markerHeight="11" refX="9" refY="5.5" orient="auto">
+          <path d="M1,1 L10,5.5 L1,10 Z" fill="#ea580c"></path>
+        </marker>
+        <marker id="arrowRecover" markerWidth="11" markerHeight="11" refX="9" refY="5.5" orient="auto">
+          <path d="M1,1 L10,5.5 L1,10 Z" fill="#0ea5a5"></path>
         </marker>
       </defs>
 
-      <path class="arrow" d="M530 338 C600 338, 640 294, 710 294"></path>
-      <path class="arrow" d="M860 331 L860 405"></path>
-      <path class="arrow" d="M860 481 L860 555"></path>
-      <path class="arrow" d="M1010 595 C1080 595, 1100 294, 1160 294"></path>
-      <path class="arrow" d="M1370 294 L1435 294"></path>
-      <path class="arrow" d="M1540 331 C1540 368, 1465 386, 1414 423"></path>
-      <path class="arrow" d="M1388 545 C1340 580, 1280 610, 1280 610"></path>
-      <path class="arrow" d="M1400 475 C1540 455, 1710 320, 1880 320"></path>
-      <path class="arrow" d="M1400 687 L1530 650"></path>
-      <path class="arrow" d="M1750 655 C1810 650, 1830 520, 1880 520"></path>
-      <path class="arrow" d="M1640 686 C1660 725, 1530 755, 1480 783"></path>
-      <path class="arrow" d="M1455 905 C1400 925, 1360 929, 1370 929"></path>
-      <path class="arrow" d="M1370 930 C1300 850, 1240 760, 1250 686"></path>
-      <path class="arrow" d="M1532 835 C1610 870, 1640 912, 1640 930"></path>
-      <path class="arrow" d="M2010 351 L2010 430"></path>
-      <path class="arrow" d="M2010 506 L2010 590"></path>
-      <path class="arrow" d="M1880 632 C1815 650, 1800 930, 1750 970"></path>
-      <path class="arrow" d="M2010 666 L2010 750"></path>
-      <path class="arrow" d="M2010 826 L2010 905"></path>
-      <path class="arrow highlight" d="M1880 946 C1640 1040, 950 1000, 860 796"></path>
-      <path class="arrow highlight" d="M530 758 C610 758, 640 758, 710 758"></path>
-      <path class="arrow highlight" d="M1010 758 C1110 760, 1120 650, 1160 650"></path>
-      <path class="arrow secondary" d="M530 540 C620 540, 620 948, 710 948"></path>
-      <path class="arrow secondary" d="M1010 948 C1120 1070, 1740 1090, 1880 946"></path>
-      <path class="arrow secondary" d="M1010 948 C1240 1120, 1620 1120, 1820 1200"></path>
+      <!-- 主流程：全部水平推进 -->
+      <polyline class="arrow" points="290,333 335,333"></polyline>
+      <polyline class="arrow" points="515,333 560,333"></polyline>
+      <polyline class="arrow" points="740,333 785,333"></polyline>
+      <polyline class="arrow" points="965,333 1010,333"></polyline>
+      <polyline class="arrow" points="1195,333 1255,333"></polyline>
+      <polyline class="arrow" points="1314,392 1314,430 995,430 995,551"></polyline>
+      <polyline class="arrow" points="995,551 1085,551"></polyline>
+      <polyline class="arrow" points="1300,551 1370,551"></polyline>
+      <polyline class="arrow" points="1488,551 1665,551"></polyline>
 
-      <path class="arrow secondary" d="M860 631 C820 850, 650 1130, 500 1182"></path>
-      <path class="arrow secondary" d="M2010 351 C1950 1030, 760 1100, 710 1182"></path>
-      <path class="arrow secondary" d="M2010 946 C1800 1060, 1100 1120, 1040 1182"></path>
-      <path class="arrow secondary" d="M1280 686 C1320 1050, 1280 1110, 1370 1182"></path>
-      <path class="arrow secondary" d="M1280 610 C1380 1110, 1600 1130, 1660 1182"></path>
+      <!-- Reviewer 打回：只在局部下方折返 -->
+      <polyline class="arrow red" points="1429,609 1429,645 1300,645"></polyline>
+      <polyline class="arrow red" points="1080,645 888,645 888,592"></polyline>
+
+      <!-- 升级与重试超限：走独立竖向通道，不穿主节点 -->
+      <polyline class="route-channel" points="1373,333 1545,333 1545,730 540,730 540,872"></polyline>
+      <polyline class="arrow human" points="1373,333 1545,333 1545,730 540,730 540,872"></polyline>
+      <polyline class="arrow human" points="1190,700 1190,735 540,735 540,872"></polyline>
+
+      <!-- 人工审核：第二层水平推进 -->
+      <polyline class="arrow human" points="330,913 430,913"></polyline>
+      <polyline class="arrow human" points="650,913 735,913"></polyline>
+      <polyline class="arrow human" points="950,913 1040,913"></polyline>
+      <polyline class="arrow human" points="1158,913 1240,913 1240,860 1325,860"></polyline>
+      <polyline class="arrow human" points="1560,860 1628,860 1628,592 1665,592"></polyline>
+      <polyline class="arrow human" points="1099,970 1099,1001 1325,1001"></polyline>
+
+      <!-- 用户补充恢复：下方独立通道返回 process -->
+      <polyline class="arrow recover" points="1560,1001 1660,1001"></polyline>
+      <polyline class="arrow recover" points="1778,960 1778,810 888,810 888,592"></polyline>
     </svg>
   </div>
 </body>

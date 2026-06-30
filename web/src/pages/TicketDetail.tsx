@@ -21,7 +21,7 @@ import { Markdown } from '@/components/ui/markdown'
 import { formatDuration } from '@/components/trace/spanTypes'
 import {
   ArrowLeft, MessageSquare, Brain, Clock, Layers, Bot, Wrench,
-  BookOpen, ExternalLink, Activity, Zap, GitFork, Send,
+  BookOpen, ExternalLink, Activity, Zap, GitFork, Send, ShieldCheck, RotateCcw,
 } from 'lucide-react'
 
 export function TicketDetail() {
@@ -87,6 +87,15 @@ export function TicketDetail() {
     return <DetailSkeleton />
   }
 
+  const reviewPassed = ticket.status === 'completed'
+    && Boolean(ticket.processing_result)
+    && (ticket.review_score == null || ticket.review_score >= 0.7)
+  const waitingForUserInput = ticket.status === 'waiting_user_input'
+  const canShowProcessingResult = Boolean(ticket.processing_result)
+    && (reviewPassed || waitingForUserInput)
+  const reviewFailed = ticket.review_score != null && ticket.review_score < 0.7
+  const resultLabel = reviewPassed ? '最终处理结果' : waitingForUserInput ? '待补充说明' : '处理结果'
+
   // 构建消息链
   const messages: { role: string; content: string }[] = []
   if (ticket.status) messages.push({ role: 'system', content: `工单创建，状态: ${ticket.status}` })
@@ -137,11 +146,17 @@ export function TicketDetail() {
                 </div>
               </InfoField>
               <Separator className="bg-border" />
-              <InfoField label="处理结果">
+              <InfoField label={resultLabel}>
                 <div className="mt-1">
-                  {ticket.processing_result
+                  {canShowProcessingResult && ticket.processing_result
                     ? <Markdown>{ticket.processing_result}</Markdown>
-                    : <span className="text-sm text-muted-foreground">等待处理...</span>}
+                    : (
+                      <ReviewGatePlaceholder
+                        status={ticket.status}
+                        hasDraft={Boolean(ticket.processing_result)}
+                        reviewFailed={reviewFailed}
+                      />
+                    )}
                 </div>
               </InfoField>
               {ticket.review_score != null && (
@@ -195,7 +210,7 @@ export function TicketDetail() {
           <ProcessLogCard
             agentMessages={messages}
             messages={ticketMessages}
-            waitingForUser={ticket.status === 'waiting_user_input'}
+            waitingForUser={waitingForUserInput}
             reply={reply}
             onReplyChange={setReply}
             onSubmit={() => {
@@ -332,6 +347,55 @@ function MiniStat({ icon, label, value }: { icon: React.ReactNode; label: string
       <div className="mb-1 text-primary">{icon}</div>
       <p className="text-base font-bold text-primary tabular-nums">{value}</p>
       <p className="text-[10px] text-muted-foreground">{label}</p>
+    </div>
+  )
+}
+
+function ReviewGatePlaceholder({
+  status,
+  hasDraft,
+  reviewFailed,
+}: {
+  status: string
+  hasDraft: boolean
+  reviewFailed: boolean
+}) {
+  const isReviewing = status === 'reviewing'
+  const isWaitingForUser = status === 'waiting_user_input'
+  const isReworking = reviewFailed || (hasDraft && ['processing', 'reviewing'].includes(status))
+
+  return (
+    <div className={`rounded-md border px-3 py-3 text-sm ${
+      isReworking
+        ? 'border-warning/30 bg-warning/5 text-warning'
+        : 'border-border bg-background text-muted-foreground'
+    }`}>
+      <div className="flex items-center gap-2">
+        {isReworking ? (
+          <RotateCcw className="h-4 w-4" />
+        ) : (
+          <ShieldCheck className="h-4 w-4 text-primary" />
+        )}
+        <span className="font-medium">
+          {isReviewing
+            ? '质量审核中，暂不展示最终答复'
+            : isWaitingForUser
+            ? 'Agent 已识别知识盲区，等待用户补充'
+            : isReworking
+            ? 'Reviewer 已进入打回/返工检查'
+            : '等待 Agent 生成处理方案'}
+        </span>
+      </div>
+      {hasDraft && !isWaitingForUser && (
+        <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+          Processor 已产出处理草稿，但需要 Reviewer 质量门禁通过后才会作为最终处理结果展示。
+        </p>
+      )}
+      {isWaitingForUser && (
+        <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+          补充信息提交后，Agent 会结合新上下文重新检索知识库并继续处理。
+        </p>
+      )}
     </div>
   )
 }

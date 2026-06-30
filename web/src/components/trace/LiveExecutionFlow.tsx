@@ -13,6 +13,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Loader2, CheckCircle2, AlertCircle, Route, Brain, MessageSquare,
   Wrench, Zap, UserCheck, GitBranch, Cpu, ChevronDown, ChevronRight,
+  SearchCheck, FileCheck2, ArrowRight,
 } from 'lucide-react'
 import type { Span, WSMessage } from '@/types'
 import { useWebSocket } from '@/hooks/useWebSocket'
@@ -65,6 +66,13 @@ interface LiveExecutionFlowProps {
   ticketId: string
   spans: Span[]
   isRunning: boolean
+}
+
+interface ReasoningStats {
+  thoughts: number
+  tools: number
+  knowledgeHits: number
+  finalAnswers: number
 }
 
 export function LiveExecutionFlow({ ticketId, spans, isRunning }: LiveExecutionFlowProps) {
@@ -124,6 +132,12 @@ export function LiveExecutionFlow({ ticketId, spans, isRunning }: LiveExecutionF
     ;[...initialEvents, ...liveEvents].forEach((e) => map.set(e.key, e))
     return Array.from(map.values()).sort((a, b) => a.timestamp - b.timestamp)
   }, [initialEvents, liveEvents])
+  const totalReasoningStats = useMemo(() => {
+    return merged.reduce(
+      (acc, event) => mergeReasoningStats(acc, getReasoningStats(event.children)),
+      emptyReasoningStats(),
+    )
+  }, [merged])
 
   const latestEvent = merged.at(-1)
   const latestEventKey = latestEvent?.key
@@ -194,6 +208,7 @@ export function LiveExecutionFlow({ ticketId, spans, isRunning }: LiveExecutionF
           {merged.length} 个节点 · 总展开 {expanded.size}
         </span>
       </div>
+      <ReasoningPulse stats={totalReasoningStats} isRunning={isRunning} />
 
       <div ref={scrollRef} className="max-h-[640px] overflow-y-auto p-3">
         <ol className="relative space-y-2 before:absolute before:left-[15px] before:top-2 before:bottom-2 before:w-px before:bg-border">
@@ -203,6 +218,7 @@ export function LiveExecutionFlow({ ticketId, spans, isRunning }: LiveExecutionF
             const isRunningNode = isLast && isRunning
             const hasChildren = event.children.length > 0
             const isExpanded = expanded.has(event.key)
+            const reasoningStats = getReasoningStats(event.children)
             return (
               <li
                 key={event.key}
@@ -270,6 +286,7 @@ export function LiveExecutionFlow({ ticketId, spans, isRunning }: LiveExecutionF
                         · {event.children.length} 步
                       </span>
                     )}
+                    <ReasoningBadges stats={reasoningStats} />
                     {isRunningNode && (
                       <span className="ml-auto text-[10px] text-primary font-medium animate-pulse">
                         进行中...
@@ -281,6 +298,10 @@ export function LiveExecutionFlow({ ticketId, spans, isRunning }: LiveExecutionF
                     <div className="px-2.5 pb-2 -mt-1">
                       <p className="text-xs text-foreground/80 leading-relaxed">{event.message}</p>
                     </div>
+                  )}
+
+                  {event.rawSpan && (
+                    <NodeCollaborationPanel span={event.rawSpan} />
                   )}
 
                   {hasChildren && isExpanded && (
@@ -308,6 +329,147 @@ export function LiveExecutionFlow({ ticketId, spans, isRunning }: LiveExecutionF
         </ol>
       </div>
     </div>
+  )
+}
+
+function NodeCollaborationPanel({ span }: { span: Span }) {
+  const handoff = extractAgentHandoff(span)
+  const quality = extractQualityReview(span)
+
+  if (!handoff && !quality) return null
+
+  return (
+    <div className="border-t border-border/60 bg-background/40 px-2.5 py-2">
+      {handoff && (
+        <div className="mb-2 rounded border border-primary/20 bg-primary/5 px-2.5 py-2">
+          <div className="flex flex-wrap items-center gap-2 text-[10px] font-medium text-primary">
+            <span>{handoff.fromAgent}</span>
+            <ArrowRight className="h-3 w-3" />
+            <span>{handoff.toAgent}</span>
+            <span className="rounded bg-background/70 px-1.5 py-0.5 text-muted-foreground">
+              {handoff.artifact}
+            </span>
+          </div>
+          {handoff.summary && (
+            <p className="mt-1 line-clamp-2 text-[11px] leading-relaxed text-foreground/80">
+              {handoff.summary}
+            </p>
+          )}
+        </div>
+      )}
+
+      {quality && (
+        <div className="rounded border border-success/25 bg-success/5 px-2.5 py-2">
+          <div className="mb-2 flex flex-wrap items-center gap-2">
+            <span className="text-[10px] font-semibold uppercase tracking-wide text-success">
+              Reviewer 质量门禁
+            </span>
+            <span className="rounded bg-background/70 px-1.5 py-0.5 font-mono text-[10px] text-foreground">
+              {quality.score.toFixed(2)}
+            </span>
+            {quality.shouldRetry && (
+              <span className="rounded border border-warning/30 bg-warning/10 px-1.5 py-0.5 text-[10px] text-warning">
+                打回返工
+              </span>
+            )}
+          </div>
+          <div className="grid gap-1.5 sm:grid-cols-4">
+            {quality.dimensions.map((item) => (
+              <div key={item.key} className="rounded border border-border/70 bg-background/60 px-2 py-1.5">
+                <div className="mb-1 flex items-center justify-between gap-2">
+                  <span className="text-[10px] text-muted-foreground">{item.label}</span>
+                  <span className="font-mono text-[10px] text-foreground">{item.value.toFixed(2)}</span>
+                </div>
+                <div className="h-1.5 overflow-hidden rounded-full bg-muted">
+                  <div
+                    className="h-full rounded-full bg-success"
+                    style={{ width: `${Math.round((item.value / item.max) * 100)}%` }}
+                  />
+                </div>
+              </div>
+            ))}
+          </div>
+          {(quality.issues.length > 0 || quality.suggestion) && (
+            <div className="mt-2 grid gap-1.5 sm:grid-cols-2">
+              <InsightPreview
+                item={{
+                  key: 'quality_issues',
+                  label: '发现问题',
+                  value: quality.issues.length > 0 ? quality.issues.join('；') : '未发现阻断问题',
+                  tone: quality.issues.length > 0 ? 'warning' : 'success',
+                }}
+              />
+              {quality.suggestion && (
+                <InsightPreview
+                  item={{
+                    key: 'quality_suggestion',
+                    label: '改进建议',
+                    value: quality.suggestion,
+                    tone: 'primary',
+                  }}
+                />
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function ReasoningPulse({ stats, isRunning }: { stats: ReasoningStats; isRunning: boolean }) {
+  const items = [
+    { key: 'thoughts', label: '思考', value: stats.thoughts, icon: <Brain className="h-3 w-3" />, tone: 'text-primary' },
+    { key: 'tools', label: '工具', value: stats.tools, icon: <Wrench className="h-3 w-3" />, tone: 'text-success' },
+    { key: 'knowledge', label: '知识命中', value: stats.knowledgeHits, icon: <SearchCheck className="h-3 w-3" />, tone: 'text-warning' },
+    { key: 'answers', label: '结论', value: stats.finalAnswers, icon: <FileCheck2 className="h-3 w-3" />, tone: 'text-primary' },
+  ]
+
+  return (
+    <div className="border-b border-border bg-background/40 px-4 py-2">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+          推理信号
+        </span>
+        {items.map((item) => (
+          <span
+            key={item.key}
+            className="inline-flex items-center gap-1 rounded border border-border bg-card/70 px-2 py-1 text-[10px] text-muted-foreground"
+          >
+            <span className={item.tone}>{item.icon}</span>
+            <span>{item.label}</span>
+            <span className="font-mono text-foreground">{item.value}</span>
+          </span>
+        ))}
+        {isRunning && (
+          <span className="ml-auto inline-flex items-center gap-1 text-[10px] text-primary">
+            <Loader2 className="h-3 w-3 animate-spin" />
+            正在推理
+          </span>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function ReasoningBadges({ stats }: { stats: ReasoningStats }) {
+  const chips = [
+    stats.thoughts > 0 ? { label: `思考 ${stats.thoughts}`, className: 'border-primary/30 bg-primary/5 text-primary' } : null,
+    stats.tools > 0 ? { label: `工具 ${stats.tools}`, className: 'border-success/30 bg-success/5 text-success' } : null,
+    stats.knowledgeHits > 0 ? { label: `知识 ${stats.knowledgeHits}`, className: 'border-warning/30 bg-warning/5 text-warning' } : null,
+    stats.finalAnswers > 0 ? { label: `结论 ${stats.finalAnswers}`, className: 'border-primary/30 bg-primary/5 text-primary' } : null,
+  ].filter(Boolean) as { label: string; className: string }[]
+
+  if (chips.length === 0) return null
+
+  return (
+    <span className="ml-auto flex items-center gap-1">
+      {chips.map((chip) => (
+        <span key={chip.label} className={`rounded border px-1.5 py-0.5 text-[9px] font-medium ${chip.className}`}>
+          {chip.label}
+        </span>
+      ))}
+    </span>
   )
 }
 
@@ -466,6 +628,28 @@ interface RagDoc {
   preview: string
 }
 
+interface AgentHandoff {
+  fromAgent: string
+  toAgent: string
+  artifact: string
+  summary: string
+}
+
+interface QualityDimension {
+  key: string
+  label: string
+  value: number
+  max: number
+}
+
+interface QualityReview {
+  score: number
+  dimensions: QualityDimension[]
+  issues: string[]
+  suggestion: string
+  shouldRetry: boolean
+}
+
 function extractRagDocs(span: Span): RagDoc[] {
   const meta = (span.metadata || {}) as Record<string, unknown>
   const ragStats = meta.rag_stats as Record<string, unknown> | undefined
@@ -480,6 +664,107 @@ function scoreColor(score: number): string {
   if (score >= 0.5) return '#1890ff'
   if (score >= 0.35) return '#faad14'
   return '#ff4d4f'
+}
+
+function extractAgentHandoff(span: Span): AgentHandoff | null {
+  const meta = (span.metadata || {}) as Record<string, unknown>
+  const raw = meta.agent_handoff
+  if (!raw || typeof raw !== 'object') return null
+  const handoff = raw as Record<string, unknown>
+  const fromAgent = pickString(handoff.from_agent, handoff.fromAgent)
+  const toAgent = pickString(handoff.to_agent, handoff.toAgent)
+  if (!fromAgent || !toAgent) return null
+  return {
+    fromAgent,
+    toAgent,
+    artifact: pickString(handoff.artifact) || '协作交接',
+    summary: pickString(handoff.summary) || '',
+  }
+}
+
+function extractQualityReview(span: Span): QualityReview | null {
+  if (span.name !== 'review') return null
+  const out = (span.output_data || {}) as Record<string, unknown>
+  const score = typeof out.review_score === 'number' ? out.review_score : null
+  if (score == null) return null
+
+  const rawDimensions = out.dimensions && typeof out.dimensions === 'object'
+    ? out.dimensions as Record<string, unknown>
+    : {}
+  const specs = [
+    { key: 'accuracy', label: '准确性', max: 0.3 },
+    { key: 'feasibility', label: '可行性', max: 0.3 },
+    { key: 'completeness', label: '完整性', max: 0.2 },
+    { key: 'professionalism', label: '专业性', max: 0.2 },
+  ]
+  const dimensions = specs.map((spec) => ({
+    ...spec,
+    value: clampNumber(rawDimensions[spec.key], 0, spec.max),
+  }))
+  const rawIssues = Array.isArray(out.issues) ? out.issues : []
+  return {
+    score,
+    dimensions,
+    issues: rawIssues.map((issue) => String(issue)).filter(Boolean),
+    suggestion: pickString(out.suggestion, out.feedback) || '',
+    shouldRetry: Boolean(out.should_retry),
+  }
+}
+
+function clampNumber(value: unknown, min: number, max: number): number {
+  if (typeof value !== 'number' || Number.isNaN(value)) return min
+  return Math.max(min, Math.min(max, value))
+}
+
+function emptyReasoningStats(): ReasoningStats {
+  return {
+    thoughts: 0,
+    tools: 0,
+    knowledgeHits: 0,
+    finalAnswers: 0,
+  }
+}
+
+function mergeReasoningStats(a: ReasoningStats, b: ReasoningStats): ReasoningStats {
+  return {
+    thoughts: a.thoughts + b.thoughts,
+    tools: a.tools + b.tools,
+    knowledgeHits: a.knowledgeHits + b.knowledgeHits,
+    finalAnswers: a.finalAnswers + b.finalAnswers,
+  }
+}
+
+function getReasoningStats(spans: Span[]): ReasoningStats {
+  return spans.reduce((acc, span) => {
+    const output = (span.output_data || {}) as Record<string, unknown>
+    const metadata = (span.metadata || {}) as Record<string, unknown>
+
+    if (span.span_type === 'react_iter') {
+      acc.thoughts += 1
+      if (output.final_answer) {
+        acc.finalAnswers += 1
+      }
+    }
+    if (span.span_type === 'llm_call') {
+      acc.thoughts += 1
+    }
+    if (span.span_type === 'tool_call') {
+      acc.tools += 1
+      const ragStats = metadata.rag_stats as Record<string, unknown> | undefined
+      const hitCount = ragStats?.hit_count
+      if (typeof hitCount === 'number') {
+        acc.knowledgeHits += hitCount
+      }
+    }
+    if (output.final_answer || output.answer || output.processing_result) {
+      acc.finalAnswers += 1
+    }
+
+    if (span.children?.length) {
+      return mergeReasoningStats(acc, getReasoningStats(span.children))
+    }
+    return acc
+  }, emptyReasoningStats())
 }
 
 interface ChildSummary {
