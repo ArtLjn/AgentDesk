@@ -3,7 +3,8 @@
 from typing import Any
 
 import bcrypt
-from fastapi import Depends, HTTPException, Request, status
+from fastapi import Depends, HTTPException, status
+from starlette.requests import HTTPConnection
 
 from src.multi_agent_system.config import Settings
 
@@ -27,13 +28,13 @@ def verify_password(plain: str, hashed: str) -> bool:
         return False
 
 
-def is_authenticated(request: Request) -> bool:
+def is_authenticated(request: HTTPConnection) -> bool:
     """检查当前 session 是否已登录。"""
     user = request.session.get("user") if hasattr(request, "session") else None
     return bool(user)
 
 
-def get_current_user(request: Request) -> dict[str, Any] | None:
+def get_current_user(request: HTTPConnection) -> dict[str, Any] | None:
     """获取当前登录用户信息，未登录返回 None。"""
     if not hasattr(request, "session"):
         return None
@@ -41,7 +42,7 @@ def get_current_user(request: Request) -> dict[str, Any] | None:
     return user if isinstance(user, dict) else None
 
 
-async def require_login(request: Request) -> dict[str, Any]:
+async def require_login(request: HTTPConnection) -> dict[str, Any]:
     """FastAPI 依赖：要求已登录，否则 401。
 
     用法：
