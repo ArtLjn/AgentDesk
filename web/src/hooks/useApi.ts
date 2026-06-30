@@ -10,11 +10,21 @@ export function useTickets(params?: Record<string, string>) {
   })
 }
 
-export function useTicket(id: string) {
+export function useTicket(id: string, refetchWhileActive = false) {
   return useQuery({
     queryKey: ['ticket', id],
     queryFn: () => api.getTicket(id),
     enabled: !!id,
+    refetchInterval: refetchWhileActive
+      ? (query) => {
+        const ticket = query.state.data
+        if (ticket && ['completed', 'failed'].includes(ticket.status)) {
+          return false
+        }
+        return 1500
+      }
+      : false,
+    refetchOnWindowFocus: true,
   })
 }
 

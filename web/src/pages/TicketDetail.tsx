@@ -28,7 +28,7 @@ export function TicketDetail() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
   const qc = useQueryClient()
-  const { data: ticket, isLoading } = useTicket(id!)
+  const { data: ticket, isLoading, refetch: refetchTicket } = useTicket(id!, true)
   const ticketStatus = ticket?.status
   const isRunning = !!ticketStatus && !['completed', 'failed'].includes(ticketStatus)
   const { data: trace } = useTicketTrace(id!, isRunning)
@@ -68,7 +68,11 @@ export function TicketDetail() {
     if (traceId) {
       qc.invalidateQueries({ queryKey: ['traceDecisions', traceId] })
     }
-  }, [id, qc, traceId])
+
+    if (['completed', 'failed'].includes(msg.status) || msg.node === 'complete') {
+      void refetchTicket()
+    }
+  }, [id, qc, refetchTicket, traceId])
 
   useWebSocket(refreshTicketSnapshot)
 

@@ -69,7 +69,10 @@ interface LiveExecutionFlowProps {
 
 export function LiveExecutionFlow({ ticketId, spans, isRunning }: LiveExecutionFlowProps) {
   const [liveEvents, setLiveEvents] = useState<FlowEvent[]>([])
+  const [manualExpanded, setManualExpanded] = useState<Set<string>>(new Set())
+  const [manualCollapsed, setManualCollapsed] = useState<Set<string>>(new Set())
   const seenKeys = useRef<Set<string>>(new Set())
+  const scrollRef = useRef<HTMLDivElement | null>(null)
 
   const initialEvents = useMemo<FlowEvent[]>(() => {
     return spans
@@ -97,19 +100,20 @@ export function LiveExecutionFlow({ ticketId, spans, isRunning }: LiveExecutionF
     if (msg.node === 'error') return
 
     const data = (msg.data || {}) as Record<string, unknown>
-    const spanId = (data.span_id as string) || `${msg.node}-${msg.timestamp}`
+    const span = (data.span || {}) as Partial<Span>
+    const spanId = span.span_id || (data.span_id as string) || `${msg.node}-${msg.timestamp}`
     if (seenKeys.current.has(spanId)) return
     seenKeys.current.add(spanId)
 
     const event: FlowEvent = {
       key: spanId,
-      node: msg.node,
-      spanType: data.span_type as string | undefined,
+      node: span.name || msg.node,
+      spanType: span.span_type || (data.span_type as string | undefined),
       message: msg.message,
-      status: (data.status as string) || 'ok',
-      duration: data.duration as number | undefined,
+      status: span.status || (data.status as string) || 'ok',
+      duration: span.duration ?? (data.duration as number | undefined),
       timestamp: new Date(msg.timestamp).getTime() / 1000,
-      isError: msg.status === 'failed' || data.status === 'error',
+      isError: msg.status === 'failed' || span.status === 'error' || data.status === 'error',
       children: [],
     }
     setLiveEvents((prev) => [...prev, event])
@@ -121,20 +125,48 @@ export function LiveExecutionFlow({ ticketId, spans, isRunning }: LiveExecutionF
     return Array.from(map.values()).sort((a, b) => a.timestamp - b.timestamp)
   }, [initialEvents, liveEvents])
 
-  const expandedSet = useState<Set<string>>(() => {
-    const init = new Set<string>()
-    if (initialEvents.length > 0) {
-      const last = initialEvents[initialEvents.length - 1]
-      init.add(last.key)
+  const latestEvent = merged.at(-1)
+  const latestEventKey = latestEvent?.key
+  const latestEventChildrenLength = latestEvent?.children.length ?? 0
+
+  const expanded = useMemo(() => {
+    const next = new Set(manualExpanded)
+    if (latestEventKey && latestEventChildrenLength > 0 && !manualCollapsed.has(latestEventKey)) {
+      next.add(latestEventKey)
     }
-    return init
-  })[0]
-  const [expanded, setExpanded] = useState<Set<string>>(expandedSet)
+    return next
+  }, [latestEventKey, latestEventChildrenLength, manualCollapsed, manualExpanded])
+
+  useEffect(() => {
+    if (!latestEventKey || !scrollRef.current) return
+
+    const timer = window.setTimeout(() => {
+      scrollRef.current?.scrollTo({
+        top: scrollRef.current.scrollHeight,
+        behavior: 'smooth',
+      })
+    }, 80)
+
+    return () => window.clearTimeout(timer)
+  }, [expanded, latestEventKey])
 
   const toggleExpand = (key: string) => {
-    setExpanded((prev) => {
+    if (key === latestEventKey) {
+      setManualCollapsed((prev) => {
+        const next = new Set(prev)
+        if (expanded.has(key)) {
+          next.add(key)
+        } else {
+          next.delete(key)
+        }
+        return next
+      })
+      return
+    }
+
+    setManualExpanded((prev) => {
       const next = new Set(prev)
-      if (next.has(key)) {
+      if (expanded.has(key)) {
         next.delete(key)
       } else {
         next.add(key)
@@ -142,19 +174,6 @@ export function LiveExecutionFlow({ ticketId, spans, isRunning }: LiveExecutionF
       return next
     })
   }
-
-  const autoExpandedKey = useMemo(() => {
-    if (!isRunning) return
-    const lastWithChildren = [...merged].reverse().find((e) => e.children.length > 0)
-    return lastWithChildren?.key
-  }, [merged, isRunning])
-
-  const expandedForRender = useMemo(() => {
-    if (!autoExpandedKey) return expanded
-    const next = new Set(expanded)
-    next.add(autoExpandedKey)
-    return next
-  }, [expanded, autoExpandedKey])
 
   if (merged.length === 0 && !isRunning) {
     return null
@@ -172,18 +191,18 @@ export function LiveExecutionFlow({ ticketId, spans, isRunning }: LiveExecutionF
           {isRunning ? 'Agent 正在工作' : '执行完成'}
         </span>
         <span className="ml-auto text-[11px] text-muted-foreground">
-          {merged.length} 个节点 · 总展开 {expandedForRender.size}
+          {merged.length} 个节点 · 总展开 {expanded.size}
         </span>
       </div>
 
-      <div className="max-h-[640px] overflow-y-auto p-3">
+      <div ref={scrollRef} className="max-h-[640px] overflow-y-auto p-3">
         <ol className="relative space-y-2 before:absolute before:left-[15px] before:top-2 before:bottom-2 before:w-px before:bg-border">
           {merged.map((event, idx) => {
             const style = getStyle(event.node, event.spanType)
             const isLast = idx === merged.length - 1
             const isRunningNode = isLast && isRunning
             const hasChildren = event.children.length > 0
-            const isExpanded = expandedForRender.has(event.key)
+            const isExpanded = expanded.has(event.key)
             return (
               <li
                 key={event.key}
