@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import random
 from datetime import datetime
 from functools import partial
 from typing import Any
@@ -9,10 +10,12 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from loguru import logger
 
+from src.multi_agent_system.core import CachedLLMClient
 from src.multi_agent_system.core.logging import generate_trace_id
 from src.multi_agent_system.models.message import TicketMessageCreate
 from src.multi_agent_system.models.ticket import (
     BatchTicketCreate,
+    TicketCategory,
     TicketCreate,
     TicketResponse,
 )
@@ -32,6 +35,25 @@ _ws_connections: dict[str, list[WebSocket]] = {}
 
 # 全局 WebSocket 连接：接收所有工单状态更新
 _global_ws_connections: list[WebSocket] = []
+
+_MOCK_CATEGORY_GUIDANCE = {
+    TicketCategory.INQUIRY.value: {
+        "label": "咨询类",
+        "instruction": "生成咨询类问题：用户主要询问入口、规则、操作方法或使用说明，语气平和。避免生成系统故障、P0、投诉或退款语气。",
+    },
+    TicketCategory.TECHNICAL.value: {
+        "label": "技术类",
+        "instruction": "生成技术类问题：用户遇到报错、登录失败、页面异常、接口失败或性能问题。除非明确大范围不可用，否则不要默认写成 P0 紧急事故。",
+    },
+    TicketCategory.BILLING.value: {
+        "label": "账务类",
+        "instruction": "生成账务类问题：用户围绕账单、扣费、退款、套餐、发票或支付记录求助，避免写成系统宕机。",
+    },
+    TicketCategory.COMPLAINT.value: {
+        "label": "投诉类",
+        "instruction": "生成投诉类问题：用户表达不满、服务体验差或要求反馈处理，但不要默认夸大成全站故障。",
+    },
+}
 
 
 def _parse_references(ticket: dict[str, Any]) -> list[str]:
@@ -75,6 +97,148 @@ def _enrich_trace(trace: dict[str, Any]) -> dict[str, Any]:
     enriched["references"] = references
     enriched.pop("ticket_references_json", None)
     return enriched
+
+
+def _pick_mock_question_document(
+    docs: list[Any],
+    category: str | None = None,
+) -> dict[str, Any] | None:
+    """从知识库文档中随机选择一个可用于出题的文档。"""
+    candidates = [
+        doc for doc in docs
+        if isinstance(doc, dict) and _mock_doc_text(doc)
+    ]
+    if not candidates:
+        return None
+    if category:
+        same_category = [
+            doc for doc in candidates
+            if str(doc.get("category") or "") == category
+        ]
+        if same_category:
+            candidates = same_category
+    return random.SystemRandom().choice(candidates)
+
+
+def _mock_doc_text(doc: dict[str, Any]) -> str:
+    """提取适合发给 LLM 的知识库片段文本。"""
+    chunks = doc.get("chunks")
+    chunk_text = ""
+    if isinstance(chunks, list):
+        chunk_text = "\n".join(
+            str(chunk.get("content", ""))
+            for chunk in chunks[:3]
+            if isinstance(chunk, dict)
+        )
+    text = doc.get("preview") or doc.get("content") or chunk_text
+    return str(text).strip()
+
+
+async def _generate_mock_question_by_llm(
+    doc: dict[str, Any],
+    category: str | None = None,
+) -> str:
+    """调用 LLM 将知识库片段改写成自然用户问题。"""
+    title = str(doc.get("title") or "知识库文档")
+    doc_category = str(doc.get("category") or "未分类")
+    requested_category = category or None
+    guidance = _MOCK_CATEGORY_GUIDANCE.get(requested_category or "")
+    category_label = guidance["label"] if guidance else doc_category
+    category_instruction = guidance["instruction"] if guidance else "按知识库内容自然生成对应类型的问题。"
+    content = _mock_doc_text(doc)[:1200]
+    client = CachedLLMClient()
+    response = await client.chat_completions_create(
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "你是工单演示数据生成 Agent。请根据给定知识库片段，"
+                    "生成一条真实用户会提交的中文工单问题。要求："
+                    "1. 不要复述知识库答案；2. 像用户遇到问题在求助；"
+                    "3. 30 到 80 字；4. 不要编号，不要解释，只输出问题本身；"
+                    "5. 可以自然包含焦虑、时间、影响范围或联系方式等细节；"
+                    f"6. 本次必须生成{category_label}工单。{category_instruction}"
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"知识库标题：{title}\n"
+                    f"知识库分类：{doc_category}\n"
+                    f"目标生成类型：{category_label}\n"
+                    f"知识库片段：\n{content}\n\n"
+                    "请生成一条 mock 工单问题。"
+                ),
+            },
+        ],
+        temperature=0.95,
+        cache=False,
+        task_type="classify",
+        max_tokens=120,
+    )
+    choice = response.choices[0] if getattr(response, "choices", None) else None
+    message = getattr(choice, "message", None)
+    raw = getattr(message, "content", "") if message is not None else ""
+    return _clean_mock_question(str(raw))
+
+
+def _clean_mock_question(value: str) -> str:
+    """清理模型输出，避免带引号、列表符号或解释性前缀。"""
+    text = value.strip().strip('"').strip("'").strip()
+    text = text.removeprefix("问题：").removeprefix("工单问题：").strip()
+    for prefix in ("-", "1.", "1、"):
+        if text.startswith(prefix):
+            text = text[len(prefix):].strip()
+    return text[:120]
+
+
+def _fallback_mock_question(
+    doc: dict[str, Any] | None = None,
+    category: str | None = None,
+) -> str:
+    """LLM 不可用时的随机兜底问题。"""
+    if category == TicketCategory.INQUIRY.value:
+        variants = [
+            "我想咨询一下本月工单报表应该在哪里导出，需要提前配置权限吗？",
+            "我想咨询这个功能的具体使用步骤，现在不太确定应该从哪个入口开始操作。",
+            "我想咨询当前规则适用于哪些场景，需要准备哪些信息才能继续办理？",
+        ]
+        return random.SystemRandom().choice(variants)
+    if category == TicketCategory.TECHNICAL.value:
+        variants = [
+            "我刚才打开页面时一直提示请求失败，刷新后还是不稳定，请帮我排查原因。",
+            "登录后部分功能加载很慢，偶尔会报错，请帮我看下是不是配置异常。",
+            "提交表单时页面没有成功反馈，我担心数据没保存，请帮我确认处理办法。",
+        ]
+        return random.SystemRandom().choice(variants)
+    if category == TicketCategory.BILLING.value:
+        variants = [
+            "我想核对一下最近的扣费记录，账单金额和预期不一致，请帮我确认原因。",
+            "付款后套餐状态还没更新，请帮我看下支付记录是否已经同步。",
+            "我需要申请发票，但页面上找不到对应入口，请帮我说明办理步骤。",
+        ]
+        return random.SystemRandom().choice(variants)
+    if category == TicketCategory.COMPLAINT.value:
+        variants = [
+            "我对这次处理结果不太满意，已经多次反馈还没有解决，请帮我升级跟进。",
+            "客服回复没有解决我的问题，等待时间也比较长，请安排人员重新处理。",
+            "这次服务体验不符合预期，我希望有人确认问题原因并给出明确答复。",
+        ]
+        return random.SystemRandom().choice(variants)
+    if doc:
+        title = str(doc.get("title") or "这个功能")
+        variants = [
+            f"我在处理“{title}”相关问题时卡住了，不确定下一步该怎么操作，请帮我看一下。",
+            f"刚才遇到“{title}”相关异常，影响我继续使用，请帮我给出处理步骤。",
+            f"我想咨询“{title}”这个场景，当前不知道需要准备哪些信息，请帮忙说明。",
+        ]
+    else:
+        variants = [
+            "我现在无法完成后台操作，页面一直没有明确提示，请帮我判断该怎么处理。",
+            "我遇到一个业务流程问题，不确定需要提供哪些信息，请帮我整理处理步骤。",
+            "刚才使用系统时流程中断了，影响继续操作，请帮我排查原因并给出方案。",
+        ]
+    return random.SystemRandom().choice(variants)
 
 
 # ============================================================
@@ -170,6 +334,54 @@ async def create_batch_tickets(body: BatchTicketCreate, request: Request) -> dic
 
     logger.info(f"批量工单已提交: {len(body.tickets)} 个")
     return {"results": results}
+
+
+@router.get("/tickets/mock-question", response_model=dict)
+async def generate_mock_ticket_question(
+    request: Request,
+    category: TicketCategory | None = Query(
+        default=None,
+        description="指定 mock 问题生成类型",
+    ),
+) -> dict:
+    """基于知识库随机片段生成一条自然用户口吻的 mock 工单问题。"""
+    knowledge_tool = getattr(request.app.state, "knowledge_tool", None)
+    requested_category = category.value if category else None
+
+    try:
+        docs_resp = knowledge_tool.list_documents(limit=100) if knowledge_tool else {}
+        docs = docs_resp.get("documents", []) if isinstance(docs_resp, dict) else []
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"mock 工单读取知识库失败，使用兜底问题: {exc}")
+        docs = []
+
+    doc = _pick_mock_question_document(docs, requested_category)
+    if doc is None:
+        return {
+            "prompt": _fallback_mock_question(category=requested_category),
+            "generation_mode": "fallback",
+            "knowledge_title": None,
+            "category": requested_category,
+        }
+
+    try:
+        prompt = await _generate_mock_question_by_llm(doc, requested_category)
+        if prompt:
+            return {
+                "prompt": prompt,
+                "generation_mode": "llm",
+                "knowledge_title": doc.get("title"),
+                "category": requested_category or doc.get("category"),
+            }
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"mock 工单 LLM 生成失败，使用知识库随机兜底: {exc}")
+
+    return {
+        "prompt": _fallback_mock_question(doc, requested_category),
+        "generation_mode": "fallback",
+        "knowledge_title": doc.get("title"),
+        "category": requested_category or doc.get("category"),
+    }
 
 
 @router.get("/tickets/{ticket_id}", response_model=TicketResponse)

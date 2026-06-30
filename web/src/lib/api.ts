@@ -4,6 +4,7 @@ import type {
   KnowledgeListResponse,
   SystemSettings,
   Ticket,
+  TicketCategory,
   TicketCreateResponse,
   TicketFeedbackResponse,
   TicketListParams,
@@ -81,6 +82,12 @@ export const api = {
   getTicket: (id: string) => request<Ticket>(`/tickets/${id}`),
   createTicket: (data: { content: string; user_id?: string }) =>
     request<TicketCreateResponse>('/tickets', { method: 'POST', body: JSON.stringify(data) }),
+  generateMockTicketQuestion: (category?: TicketCategory) => {
+    const qs = category ? `?${new URLSearchParams({ category }).toString()}` : ''
+    return request<{ prompt: string; generation_mode: string; knowledge_title: string | null; category: TicketCategory | null }>(
+      `/tickets/mock-question${qs}`,
+    )
+  },
   submitFeedback: (id: string, satisfied: boolean) =>
     request<TicketFeedbackResponse>(`/tickets/${id}/feedback`, { method: 'POST', body: JSON.stringify({ satisfied }) }),
   getTicketMessages: (id: string) =>

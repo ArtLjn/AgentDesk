@@ -6,7 +6,7 @@
 
 from contextlib import asynccontextmanager
 from datetime import datetime
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import FastAPI
@@ -263,6 +263,103 @@ class TestKnowledgeAPI:
         data = response.json()
         assert data["count"] == 1
         assert data["documents"][0]["title"] == "登录故障手册"
+
+    def test_generate_mock_ticket_uses_llm_with_random_knowledge(self, client):
+        """GET /api/tickets/mock-question 基于知识库片段调用 LLM 生成模拟问题。"""
+        client.app.state.knowledge_tool.list_documents = MagicMock(
+            return_value={
+                "documents": [
+                    {
+                        "id": "doc-1",
+                        "title": "登录故障手册",
+                        "category": "technical",
+                        "content": "二次验证丢失时需要检查备用码和 TOTP 时间同步。",
+                        "preview": "二次验证丢失时需要检查备用码和 TOTP 时间同步。",
+                        "chunk_count": 1,
+                        "chunks": [],
+                    }
+                ],
+                "count": 1,
+                "next_offset": None,
+            }
+        )
+        llm_response = MagicMock()
+        llm_response.choices = [
+            MagicMock(
+                message=MagicMock(
+                    content="我换了手机后二次验证收不到验证码了，请帮我恢复登录。"
+                )
+            )
+        ]
+
+        with patch(
+            "src.multi_agent_system.api.routes.CachedLLMClient"
+        ) as client_cls:
+            client_cls.return_value.chat_completions_create = AsyncMock(
+                return_value=llm_response
+            )
+            response = client.get("/api/tickets/mock-question")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["prompt"] == "我换了手机后二次验证收不到验证码了，请帮我恢复登录。"
+        assert data["generation_mode"] == "llm"
+        assert data["knowledge_title"] == "登录故障手册"
+        client_cls.return_value.chat_completions_create.assert_awaited_once()
+
+    def test_generate_mock_ticket_passes_selected_category_to_llm(self, client):
+        """GET /api/tickets/mock-question?category=inquiry 会约束 LLM 生成咨询类问题。"""
+        client.app.state.knowledge_tool.list_documents = MagicMock(
+            return_value={
+                "documents": [
+                    {
+                        "id": "doc-1",
+                        "title": "报表导出说明",
+                        "category": "technical",
+                        "content": "用户可以在工单列表右上角导出本月报表。",
+                        "preview": "用户可以在工单列表右上角导出本月报表。",
+                        "chunk_count": 1,
+                        "chunks": [],
+                    }
+                ],
+                "count": 1,
+                "next_offset": None,
+            }
+        )
+        llm_response = MagicMock()
+        llm_response.choices = [
+            MagicMock(message=MagicMock(content="我想咨询本月工单报表在哪里导出？"))
+        ]
+
+        with patch(
+            "src.multi_agent_system.api.routes.CachedLLMClient"
+        ) as client_cls:
+            client_cls.return_value.chat_completions_create = AsyncMock(
+                return_value=llm_response
+            )
+            response = client.get("/api/tickets/mock-question?category=inquiry")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["category"] == "inquiry"
+        call_kwargs = client_cls.return_value.chat_completions_create.await_args.kwargs
+        prompt_text = "\n".join(message["content"] for message in call_kwargs["messages"])
+        assert "咨询类" in prompt_text
+        assert "避免生成系统故障、P0、投诉或退款语气" in prompt_text
+
+    def test_generate_mock_ticket_fallback_uses_selected_category_without_knowledge(self, client):
+        """知识库为空时，选咨询类型也应返回咨询类兜底问题。"""
+        client.app.state.knowledge_tool.list_documents = MagicMock(
+            return_value={"documents": [], "count": 0, "next_offset": None}
+        )
+
+        response = client.get("/api/tickets/mock-question?category=inquiry")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["generation_mode"] == "fallback"
+        assert data["category"] == "inquiry"
+        assert "咨询" in data["prompt"]
 
     def test_upload_knowledge_missing_fields(self, client):
         """POST /api/knowledge 缺少必填字段返回 400。"""

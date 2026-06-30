@@ -2,7 +2,6 @@ import { useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useTickets, useCreateTicket } from '@/hooks/useApi'
 import { api } from '@/lib/api'
-import { buildKnowledgeMockTicketPrompt } from '@/lib/mockTicketPrompt'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -17,12 +16,27 @@ import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger,
 } from '@/components/ui/dialog'
 import { StatusBadge, CategoryBadge, PriorityBadge } from '@/components/layout/StatusBadge'
-import type { KnowledgeDocument, Ticket } from '@/types'
+import type { Ticket, TicketCategory } from '@/types'
 import {
   Bot, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Loader2, Plus, RefreshCw, Search, SendHorizontal, Sparkles,
 } from 'lucide-react'
 
 const PAGE_SIZE_OPTIONS = [10, 20, 50]
+
+const MOCK_CATEGORY_OPTIONS: Array<{ value: TicketCategory; label: string }> = [
+  { value: 'inquiry', label: '咨询问询' },
+  { value: 'technical', label: '技术支持' },
+  { value: 'billing', label: '账务问题' },
+  { value: 'complaint', label: '投诉建议' },
+]
+
+const MOCK_CATEGORY_LABELS = MOCK_CATEGORY_OPTIONS.reduce<Record<TicketCategory, string>>(
+  (acc, option) => {
+    acc[option.value] = option.label
+    return acc
+  },
+  {} as Record<TicketCategory, string>,
+)
 
 const EXAMPLE_PROMPTS = [
   '今天上午 10:15 开始后台一直 504，部分业务人员无法登录，请尽快恢复，联系 ops@example.com',
@@ -39,8 +53,8 @@ function AgentTicketComposer({ compact = false, onCreated }: AgentTicketComposer
   const [userId, setUserId] = useState('U001')
   const [content, setContent] = useState('')
   const [mockPrompt, setMockPrompt] = useState('')
-  const [mockDocs, setMockDocs] = useState<KnowledgeDocument[]>([])
-  const [mockSeed, setMockSeed] = useState(0)
+  const [mockSource, setMockSource] = useState<string>('')
+  const [mockCategory, setMockCategory] = useState<TicketCategory>('inquiry')
   const [mockLoading, setMockLoading] = useState(false)
   const createMutation = useCreateTicket()
 
@@ -59,22 +73,18 @@ function AgentTicketComposer({ compact = false, onCreated }: AgentTicketComposer
   const refreshMockPrompt = async () => {
     setMockLoading(true)
     try {
-      const docs = mockDocs.length > 0
-        ? mockDocs
-        : (await api.getKnowledge({ limit: '20' })).documents
-      setMockDocs(docs)
-      const nextSeed = mockSeed + 1
-      setMockSeed(nextSeed)
-      const next = buildKnowledgeMockTicketPrompt(docs, nextSeed)
-        || EXAMPLE_PROMPTS[nextSeed % EXAMPLE_PROMPTS.length]
-      setMockPrompt(next)
-      setContent(next)
+      const result = await api.generateMockTicketQuestion(mockCategory)
+      setMockPrompt(result.prompt)
+      setContent(result.prompt)
+      const categoryLabel = result.category ? MOCK_CATEGORY_LABELS[result.category] : MOCK_CATEGORY_LABELS[mockCategory]
+      setMockSource(result.knowledge_title
+        ? `${categoryLabel} · ${result.generation_mode === 'llm' ? 'AI 生成' : '兜底生成'} · ${result.knowledge_title}`
+        : `${categoryLabel} · 兜底生成`)
     } catch {
-      const nextSeed = mockSeed + 1
-      setMockSeed(nextSeed)
-      const fallback = EXAMPLE_PROMPTS[nextSeed % EXAMPLE_PROMPTS.length]
+      const fallback = EXAMPLE_PROMPTS[Math.floor(Math.random() * EXAMPLE_PROMPTS.length)]
       setMockPrompt(fallback)
       setContent(fallback)
+      setMockSource('本地兜底')
     } finally {
       setMockLoading(false)
     }
@@ -139,11 +149,29 @@ function AgentTicketComposer({ compact = false, onCreated }: AgentTicketComposer
         </div>
       </div>
 
-      <div className="mt-3 grid gap-2 lg:grid-cols-[auto_auto_auto_auto_1fr] lg:items-center">
+      <div className="mt-3 grid gap-2 lg:grid-cols-[auto_auto_auto_auto_auto_1fr] lg:items-center">
         <span className="text-[11px] text-muted-foreground">Agent 将自动生成：</span>
         <Badge variant="secondary" className="w-fit text-[10px]">问题标题</Badge>
         <Badge variant="secondary" className="w-fit text-[10px]">分类</Badge>
         <Badge variant="secondary" className="w-fit text-[10px]">优先级</Badge>
+        <Select
+          value={mockCategory}
+          onValueChange={(value) => setMockCategory(value as TicketCategory)}
+        >
+          <SelectTrigger
+            aria-label="选择 mock 问题生成类型"
+            className="h-8 w-full min-w-[112px] text-[11px] lg:w-[112px]"
+          >
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent className="border-border bg-popover">
+            {MOCK_CATEGORY_OPTIONS.map(option => (
+              <SelectItem key={option.value} value={option.value}>
+                {option.label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
         <div className="flex min-w-0 items-center rounded-md border border-border bg-background/60">
           <button
             type="button"
@@ -153,6 +181,11 @@ function AgentTicketComposer({ compact = false, onCreated }: AgentTicketComposer
           >
             {mockPrompt || 'Agent 可根据知识库生成一条 mock 问题'}
           </button>
+          {mockSource && (
+            <span className="hidden shrink-0 px-2 text-[10px] text-muted-foreground/80 lg:inline">
+              {mockSource}
+            </span>
+          )}
           <Tooltip>
             <TooltipTrigger
               render={(
