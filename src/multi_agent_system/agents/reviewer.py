@@ -27,6 +27,9 @@ _REVIEWER_SYSTEM_PROMPT = """\
 4. 专业性（0-0.2）：语言是否清晰、专业、无歧义
 
 请综合以上维度给出总分（0-1），指出潜在问题，并判断是否建议返工。
+如果只是补充优化建议但答案已经能正确覆盖用户问题，请给出达标分数并将 should_retry 设为 false。
+只有处理结果存在答非所问、事实错误、占位 URL、危险操作、缺少关键步骤等阻断问题时，
+才将 should_retry 设为 true，并给出低于阈值的评分。
 如果问题是知识库未覆盖、用户描述不明确、缺少必要上下文等“重新生成也无法修复”的情况，
 请将 issue_type 标为 knowledge_gap 或 needs_clarification，并将 should_retry 设为 false。
 严格按以下 JSON 格式输出，不要添加任何额外内容：
@@ -178,7 +181,6 @@ class ReviewerAgent:
 
         should_retry = False if retry_suppressed else bool(
             result.get("should_retry")
-            or clean_issues
             or score < Settings().review_threshold
         )
 

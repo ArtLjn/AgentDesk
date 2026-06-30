@@ -80,6 +80,112 @@ class _KnowledgeGapReviewerAgent:
         }
 
 
+class _NeedsClarificationReviewerAgent:
+    async def review(self, content: str, processing_result: str, category: str) -> dict:
+        return {
+            "score": 0.55,
+            "feedback": "用户没有说明具体账号、订单或报错现象，无法判断。",
+            "dimensions": {
+                "accuracy": 0.12,
+                "feasibility": 0.12,
+                "completeness": 0.08,
+                "professionalism": 0.16,
+            },
+            "issues": ["缺少账号、订单或错误提示等关键上下文"],
+            "suggestion": "请用户补充账号类型、订单号或错误截图。",
+            "should_retry": False,
+            "issue_type": "needs_clarification",
+            "retry_suppressed": True,
+            "clarification_request": "请补充账号类型、订单号或错误截图。",
+        }
+
+
+class _PlaceholderIssueReviewerAgent:
+    async def review(self, content: str, processing_result: str, category: str) -> dict:
+        return {
+            "score": 0.62,
+            "feedback": "处理草稿可用，但包含 cloud.example.com 等示例占位地址。",
+            "dimensions": {
+                "accuracy": 0.18,
+                "feasibility": 0.20,
+                "completeness": 0.12,
+                "professionalism": 0.12,
+            },
+            "issues": ["未提供大模型服务官方控制台的直接链接或具体路径截图，示例域名可能误导用户"],
+            "suggestion": "移除示例域名，保留费用中心、订单管理、报销入口等与问题相关的路径。",
+            "should_retry": True,
+            "issue_type": "fixable",
+            "retry_suppressed": False,
+        }
+
+
+class _PlaceholderProcessorAgent:
+    async def process(self, content: str, category: str, priority: str) -> dict:
+        return {
+            "result": (
+                "codingplan 的报销和费用查询通常在大模型服务控制台的费用中心处理，"
+                "可先访问 cloud.example.com/console，然后进入费用中心或订单管理查看发票与报销材料。"
+            ),
+            "references": ["价格咨询知识片段：登录控制台，在费用中心或订单管理中查看套餐、发票与报销材料。"],
+        }
+
+
+class _AdvisoryReviewerAgent:
+    async def review(self, content: str, processing_result: str, category: str) -> dict:
+        return {
+            "score": 0.85,
+            "feedback": "回答能覆盖问题，但可补充中间件选型和时间评估。",
+            "dimensions": {
+                "accuracy": 0.27,
+                "feasibility": 0.26,
+                "completeness": 0.16,
+                "professionalism": 0.16,
+            },
+            "issues": ["前置条件部分可以进一步说明分库分表中间件选型"],
+            "suggestion": "补充 ShardingSphere、MyCat 等选型说明和耗时评估范围。",
+            "should_retry": True,
+            "issue_type": "fixable",
+            "retry_suppressed": False,
+        }
+
+
+class _ShardMigrationProcessorAgent:
+    async def process(self, content: str, category: str, priority: str) -> dict:
+        return {
+            "result": (
+                "根据知识库中关于数据库分库分表迁移的指导信息，建议先确认源库表结构、"
+                "数据量级、业务低峰窗口和回滚方案，再完成分片规则设计、灰度迁移、"
+                "一致性校验和流量切换。整体耗时需要结合表数量和数据量评估。"
+            ),
+            "references": ["数据库迁移知识片段：分库分表前需确认数据量、分片键、回滚方案和灰度切换窗口。"],
+        }
+
+
+class _PartialMapKnowledgeProcessorAgent:
+    async def process(self, content: str, category: str, priority: str) -> dict:
+        return {
+            "result": (
+                "知识库命中了地图 SDK 接入资料，但没有精确列出高德地图 Key、Secret "
+                "和白名单绑定细则。"
+            ),
+            "references": [
+                (
+                    "检索到以下知识片段：1. 标题: 地图服务；分类: integration-map；相似度: 0.747 "
+                    "内容: 集成高德、百度或腾讯地图 SDK 时，应检查 MAP_KEY、MAP_SECRET、"
+                    "包名、Bundle ID、域名 Referer 白名单、服务开通状态和接口返回码。"
+                )
+            ],
+        }
+
+
+class _EmptyReferenceProcessorAgent:
+    async def process(self, content: str, category: str, priority: str) -> dict:
+        return {
+            "result": "当前没有检索到可用知识片段。",
+            "references": ["未检索到相关知识片段"],
+        }
+
+
 class _CapturingProcessorAgent:
     def __init__(self) -> None:
         self.seen_content = ""
@@ -208,19 +314,112 @@ class TestTicketWorkflow:
         assert "建议" in reviewer_messages[-1]
 
     @pytest.mark.asyncio
-    async def test_knowledge_gap_stops_retry_and_requests_user_input(self):
-        """知识库盲区低分时不应反复重试或转人工，应暂停等待用户补充。"""
+    async def test_knowledge_gap_finalizes_without_user_input(self):
+        """知识库缺失时应直接告知暂无答案，不应继续要求用户补充。"""
         graph = build_ticket_graph(agents={"reviewer": _KnowledgeGapReviewerAgent()})
 
         result = await graph.ainvoke(create_initial_state("询问一下公司的模型如何进行对接 claude code"))
 
+        assert result["status"] == "completed"
+        assert result["retry_count"] == 0
+        assert result["review_retry_suppressed"] is False
+        assert result["review_issue_type"] == "knowledge_gap"
+        assert result["processing_result"] is not None
+        assert "知识库暂时没有" in result["processing_result"]
+        assert not any(message["role"] == "system" and "等待用户补充" in message["content"] for message in result["messages"])
+
+    @pytest.mark.asyncio
+    async def test_needs_clarification_requests_user_input(self):
+        """只有用户描述不清时才暂停等待用户补充。"""
+        graph = build_ticket_graph(agents={"reviewer": _NeedsClarificationReviewerAgent()})
+
+        result = await graph.ainvoke(create_initial_state("帮我看一下为什么不行"))
+
         assert result["status"] == "waiting_user_input"
         assert result["retry_count"] == 0
         assert result["review_retry_suppressed"] is True
+        assert result["review_issue_type"] == "needs_clarification"
+        assert result["processing_result"] is not None
+        assert "需要补充" in result["processing_result"]
+        assert any(message["role"] == "system" and "等待用户补充" in message["content"] for message in result["messages"])
+
+    @pytest.mark.asyncio
+    async def test_low_risk_inquiry_review_failure_keeps_question_topic_when_auto_finalized(self):
+        """低风险咨询被示例占位符打回时，兜底答复不能偏离用户原问题。"""
+        graph = build_ticket_graph(agents={
+            "processor": _PlaceholderProcessorAgent(),
+            "reviewer": _PlaceholderIssueReviewerAgent(),
+        })
+
+        result = await graph.ainvoke(create_initial_state("我想咨询一下大模型 codingplan 在哪个平台报销"))
+
+        assert result["status"] == "completed"
+        assert result["retry_count"] == 1
+        assert result["auto_finalized_review_failure"] is True
+        assert result["review_score"] >= 0.7
+        assert result["processing_result"] is not None
+        assert "cloud.example.com" not in result["processing_result"]
+        assert "codingplan" in result["processing_result"]
+        assert "报销" in result["processing_result"]
+        assert "知识库暂时没有" in result["processing_result"]
+        assert "费用中心" not in result["processing_result"]
+        assert "订单管理" not in result["processing_result"]
+        assert "Webhook" not in result["processing_result"]
+        assert "TLS" not in result["processing_result"]
+        assert any(message["role"] == "system" and "低风险咨询" in message["content"] for message in result["messages"])
+
+    @pytest.mark.asyncio
+    async def test_high_score_review_advice_keeps_processor_answer(self):
+        """Reviewer 高分建议优化时应通过，不应替换成知识库暂无答案。"""
+        graph = build_ticket_graph(agents={
+            "processor": _ShardMigrationProcessorAgent(),
+            "reviewer": _AdvisoryReviewerAgent(),
+        })
+
+        result = await graph.ainvoke(create_initial_state("我想咨询一下数据库迁移的具体操作流程，分库分表前置条件和耗时"))
+
+        assert result["status"] == "completed"
+        assert result["retry_count"] == 0
+        assert result["auto_finalized_review_failure"] is not True
+        assert result["review_score"] == 0.85
+        assert result["processing_result"] is not None
+        assert "分库分表" in result["processing_result"]
+        assert "灰度迁移" in result["processing_result"]
+        assert "知识库暂时没有" not in result["processing_result"]
+
+    @pytest.mark.asyncio
+    async def test_knowledge_gap_with_related_references_returns_reference_guidance(self):
+        """有相关知识库命中但缺精确细则时，应给参考处理建议，不应只回复不知道。"""
+        graph = build_ticket_graph(agents={
+            "processor": _PartialMapKnowledgeProcessorAgent(),
+            "reviewer": _KnowledgeGapReviewerAgent(),
+        })
+
+        result = await graph.ainvoke(create_initial_state("咨询高德地图SDK配置及白名单规则"))
+
+        assert result["status"] == "completed"
         assert result["review_issue_type"] == "knowledge_gap"
         assert result["processing_result"] is not None
-        assert "知识库未覆盖" in result["processing_result"]
-        assert any(message["role"] == "system" and "等待用户补充" in message["content"] for message in result["messages"])
+        assert "知识库命中了相关资料" in result["processing_result"]
+        assert "地图服务" in result["processing_result"]
+        assert "白名单" in result["processing_result"]
+        assert "人工确认" in result["processing_result"]
+        assert not result["processing_result"].startswith("您好，知识库暂时没有收录该问题的明确答案")
+
+    @pytest.mark.asyncio
+    async def test_knowledge_gap_ignores_empty_reference_marker(self):
+        """空检索提示不应被当作相关知识命中。"""
+        graph = build_ticket_graph(agents={
+            "processor": _EmptyReferenceProcessorAgent(),
+            "reviewer": _KnowledgeGapReviewerAgent(),
+        })
+
+        result = await graph.ainvoke(create_initial_state("咨询未收录平台入口"))
+
+        assert result["status"] == "completed"
+        assert result["processing_result"] is not None
+        assert "知识库暂时没有" in result["processing_result"]
+        assert "知识库命中了相关资料" not in result["processing_result"]
 
     @pytest.mark.asyncio
     async def test_billing_ticket_process(self, graph):
@@ -367,12 +566,23 @@ class TestReviewDecision:
 
         assert review_decision(state) == "retry_check"
 
-    def test_retry_suppressed_routes_to_user_input(self):
-        """不可通过重试修复的问题应走用户补充，不进入重试检查。"""
+    def test_knowledge_gap_routes_to_finalize(self):
+        """知识库缺失应直接归档暂无答案，不进入补充框。"""
         state = create_initial_state("测试")
         state["review_score"] = 0.55
         state["review_should_retry"] = False
         state["review_retry_suppressed"] = True
+        state["review_issue_type"] = "knowledge_gap"
+
+        assert review_decision(state) == "finalize_knowledge_gap"
+
+    def test_needs_clarification_routes_to_user_input(self):
+        """信息不足才走用户补充，不进入重试检查。"""
+        state = create_initial_state("测试")
+        state["review_score"] = 0.55
+        state["review_should_retry"] = False
+        state["review_retry_suppressed"] = True
+        state["review_issue_type"] = "needs_clarification"
 
         assert review_decision(state) == "request_user_input"
 
@@ -400,6 +610,14 @@ class TestRetryDecision:
         state["retry_count"] = 3
 
         assert retry_decision(state) == "human_review_wait"
+
+    def test_auto_finalized_review_failure_routes_to_notify(self):
+        """低风险咨询达到质检重试上限后的安全兜底应直接通知归档。"""
+        state = create_initial_state("咨询 Webhook 调试")
+        state["retry_count"] = 3
+        state["auto_finalized_review_failure"] = True
+
+        assert retry_decision(state) == "notify"
 
     def test_above_max_retries(self):
         """超过最大重试次数时转人工审核。"""

@@ -387,6 +387,20 @@ class _TraceReviewer:
         return {"score": 0.9, "feedback": "通过"}
 
 
+class _PersistentKnowledgeGapReviewer:
+    async def review(self, content: str, processing_result: str, category: str) -> dict:
+        return {
+            "score": 0.85,
+            "feedback": "当前知识库未覆盖 codingplan 报销入口的可靠答案。",
+            "issues": ["知识库缺失具体指引，无法直接解决用户问题，只能提供通用建议"],
+            "suggestion": "后续补充 codingplan 报销入口知识后再自动处理。",
+            "should_retry": False,
+            "issue_type": "knowledge_gap",
+            "retry_suppressed": True,
+            "clarification_request": "当前知识库未覆盖该问题的可靠处理方案。",
+        }
+
+
 class TestResumeFromUserInputTrace:
     """用户补充后的恢复流程应写入同一条 trace。"""
 
@@ -431,6 +445,65 @@ class TestResumeFromUserInputTrace:
         assert "user_input_resume" in names
         assert "process" in names
         assert "review" in names
+
+    @pytest.mark.asyncio
+    async def test_resume_from_user_input_finalizes_persistent_knowledge_gap(self, db_manager):
+        """用户已补充后仍是知识盲区时，应直接归档暂无答案，不再反复要求补充。"""
+        app = MagicMock()
+        trace_manager = TraceManager(db_manager)
+        trace_id = await trace_manager.start_trace("TK-user-gap")
+        await trace_manager.finish_trace(trace_id, "completed")
+
+        await db_manager.save_ticket({
+            "ticket_id": "TK-user-gap",
+            "content": "我想咨询一下大模型 codingplan 在哪个平台报销",
+            "category": "inquiry",
+            "priority": "P3",
+            "status": "waiting_user_input",
+            "retry_count": 0,
+        })
+        await db_manager.create_ticket_message({
+            "message_id": "TM-user-gap-1",
+            "ticket_id": "TK-user-gap",
+            "sender_type": "reviewer",
+            "sender_id": "reviewer-agent",
+            "content": "当前知识库未覆盖该问题的可靠处理方案，请补充平台或账号信息。",
+            "metadata": {"source": "agent_clarification_request"},
+        })
+        await db_manager.create_ticket_message({
+            "message_id": "TM-user-gap-2",
+            "ticket_id": "TK-user-gap",
+            "sender_type": "user",
+            "sender_id": "user-001",
+            "content": "就是 codingplan 报销，已经没有更多信息了",
+        })
+
+        app.state.db_manager = db_manager
+        app.state.db_tool = db_manager
+        app.state.trace_manager = trace_manager
+
+        graph_module._trace_manager = trace_manager
+        graph_module._db_manager = db_manager
+        graph_module._processor_agent = _TraceProcessor()
+        graph_module._reviewer_agent = _PersistentKnowledgeGapReviewer()
+        graph_module._active_trace_id = None
+
+        result = await resume_from_user_input(app, "TK-user-gap")
+
+        ticket = await db_manager.get_ticket("TK-user-gap")
+        messages = await db_manager.list_ticket_messages("TK-user-gap")
+        repeated_requests = [
+            message
+            for message in messages
+            if message.get("metadata", {}).get("source") == "agent_clarification_request"
+        ]
+
+        assert result["workflow_resumed"] is True
+        assert result["next_node"] == "complete"
+        assert result["ticket_status"] == "completed"
+        assert ticket["status"] == "completed"
+        assert "知识库暂时没有" in ticket["processing_result"]
+        assert len(repeated_requests) == 1
 
 
 class TestRoutingChanges:

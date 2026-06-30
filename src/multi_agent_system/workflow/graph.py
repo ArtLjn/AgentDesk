@@ -32,6 +32,7 @@ __all__ = [
     "human_review_wait",
     "request_user_input",
     "pause_for_user_input",
+    "finalize_knowledge_gap",
     "resume_from_human_decision",
     "resume_from_user_input",
 ]
@@ -86,6 +87,7 @@ def create_initial_state(content: str, ticket_id: str | None = None) -> TicketSt
         review_retry_suppressed=None,
         review_issue_type=None,
         clarification_request=None,
+        auto_finalized_review_failure=None,
         retry_count=0,
         status="received",
         messages=[],
@@ -216,11 +218,21 @@ def _build_review_decision(
     *,
     retry_suppressed: bool = False,
     issue_type: str | None = None,
+    has_conversation_context: bool = False,
 ) -> dict[str, Any]:
     """构造 review 节点的 quality_gate 决策记录。"""
     passed = score >= threshold or retry_suppressed
     confidence = min(1.0, abs(score - threshold) / max(threshold, 1e-6))
-    selection = "request_user_input" if retry_suppressed else ("pass" if passed else "reject_for_rework")
+    finalize_gap = retry_suppressed and _should_finalize_without_user_input(
+        issue_type,
+        has_conversation_context=has_conversation_context,
+    )
+    if finalize_gap:
+        selection = "finalize_knowledge_gap"
+    elif retry_suppressed:
+        selection = "request_user_input"
+    else:
+        selection = "pass" if passed else "reject_for_rework"
     return {
         "decision_type": "quality_gate",
         "trigger": {
@@ -228,25 +240,90 @@ def _build_review_decision(
             "threshold": threshold,
             "issue_type": issue_type,
             "retry_suppressed": retry_suppressed,
+            "has_conversation_context": has_conversation_context,
         },
         "options": [
             {"value": "pass", "score": round(score, 4), "reason": f"score >= {threshold}"},
             {"value": "reject_for_rework", "score": round(1 - score, 4), "reason": f"score < {threshold}"},
             {
                 "value": "request_user_input",
-                "score": 1.0 if retry_suppressed else 0.0,
-                "reason": "知识盲区或信息不足，重试无法修复",
+                "score": 1.0 if retry_suppressed and not finalize_gap else 0.0,
+                "reason": "用户描述信息不足，需要补充上下文",
+            },
+            {
+                "value": "finalize_knowledge_gap",
+                "score": 1.0 if finalize_gap else 0.0,
+                "reason": "知识库缺失或用户已补充后仍无可靠知识，停止追问并归档",
             },
         ],
         "selection": {
             "value": selection,
             "confidence": round(confidence, 4),
-            "reason": "不可重试问题，等待用户补充" if retry_suppressed else "阈值判断",
+            "reason": (
+                "无可靠知识可用，归档暂无答案"
+                if finalize_gap
+                else ("信息不足，等待用户补充" if retry_suppressed else "阈值判断")
+            ),
         },
     }
 
 
-def _format_review_feedback(result: dict[str, Any], threshold: float) -> str:
+def _should_finalize_without_user_input(
+    issue_type: str | None,
+    *,
+    has_conversation_context: bool = False,
+) -> bool:
+    """判断不可重试问题是否应直接归档，而不是继续要求用户补充。"""
+    if has_conversation_context:
+        return True
+    return issue_type in {"knowledge_gap", "out_of_scope"}
+
+
+def _should_block_for_rework(
+    *,
+    score: float,
+    threshold: float,
+    should_retry: bool,
+    retry_suppressed: bool,
+    has_blocking_artifact: bool = False,
+) -> bool:
+    """判断 Reviewer 结果是否真的要阻断流程返工。"""
+    if retry_suppressed:
+        return False
+    if has_blocking_artifact:
+        return True
+    if score < threshold:
+        return True
+    if should_retry and score < min(0.8, threshold + 0.1):
+        return True
+    return False
+
+
+def _has_blocking_artifact(*values: object) -> bool:
+    """识别示例域名、占位变量等不应出现在最终回复里的幻觉痕迹。"""
+    text = "\n".join(str(value or "") for value in values).lower()
+    blocking_markers = (
+        "example.com",
+        "api.example",
+        "cloud.example",
+        "target-domain",
+        "<user_id>",
+        "<order_id>",
+        "<api_key>",
+        "占位地址",
+        "示例域名",
+        "占位 url",
+        "占位url",
+    )
+    return any(marker in text for marker in blocking_markers)
+
+
+def _format_review_feedback(
+    result: dict[str, Any],
+    threshold: float,
+    *,
+    has_conversation_context: bool = False,
+) -> str:
     """格式化 Reviewer 的结构化质检结论，写入 Agent 消息链。"""
     score = float(result.get("score", 0.0))
     dimensions = result.get("dimensions") if isinstance(result.get("dimensions"), dict) else {}
@@ -264,7 +341,28 @@ def _format_review_feedback(result: dict[str, Any], threshold: float) -> str:
     issue_text = "；".join(str(issue) for issue in issues if str(issue).strip()) or "未发现阻断问题"
     suggestion = str(result.get("suggestion") or result.get("feedback") or "保持当前处理结果")
     retry_suppressed = bool(result.get("retry_suppressed"))
-    gate = "等待用户补充" if retry_suppressed else ("通过" if score >= threshold else "打回返工")
+    should_retry = _should_block_for_rework(
+        score=score,
+        threshold=threshold,
+        should_retry=bool(result.get("should_retry")),
+        retry_suppressed=retry_suppressed,
+        has_blocking_artifact=_has_blocking_artifact(
+            result.get("issues"),
+            result.get("suggestion"),
+            result.get("feedback"),
+        ),
+    )
+    issue_type = str(result.get("issue_type") or "none")
+    finalize_gap = retry_suppressed and _should_finalize_without_user_input(
+        issue_type,
+        has_conversation_context=has_conversation_context,
+    )
+    if finalize_gap:
+        gate = "归档暂无答案"
+    elif retry_suppressed:
+        gate = "等待用户补充"
+    else:
+        gate = "打回返工" if should_retry else "通过"
     return (
         f"审核评分: {score:.2f}（阈值 {threshold:.2f}，{gate}）\n"
         f"质检维度: {dimension_text}\n"
@@ -554,6 +652,20 @@ async def review(state: TicketState) -> dict:
                 score = result["score"]
                 threshold = _get_settings().review_threshold
                 retry_suppressed = bool(result.get("retry_suppressed"))
+                raw_should_retry = bool(result.get("should_retry", score < threshold))
+                has_blocking_artifact = _has_blocking_artifact(
+                    processing_result,
+                    result.get("issues"),
+                    result.get("suggestion"),
+                    result.get("feedback"),
+                )
+                should_retry = _should_block_for_rework(
+                    score=score,
+                    threshold=threshold,
+                    should_retry=raw_should_retry,
+                    retry_suppressed=retry_suppressed,
+                    has_blocking_artifact=has_blocking_artifact,
+                )
                 issue_type = str(result.get("issue_type") or "none")
                 clarification_request = str(result.get("clarification_request") or "")
                 span.set_output({
@@ -562,7 +674,9 @@ async def review(state: TicketState) -> dict:
                     "dimensions": result.get("dimensions", {}),
                     "issues": result.get("issues", []),
                     "suggestion": result.get("suggestion", ""),
-                    "should_retry": result.get("should_retry", score < threshold),
+                    "should_retry": should_retry,
+                    "raw_should_retry": raw_should_retry,
+                    "has_blocking_artifact": has_blocking_artifact,
                     "issue_type": issue_type,
                     "retry_suppressed": retry_suppressed,
                     "clarification_request": clarification_request,
@@ -573,11 +687,17 @@ async def review(state: TicketState) -> dict:
                         threshold=threshold,
                         retry_suppressed=retry_suppressed,
                         issue_type=issue_type,
+                        has_conversation_context=bool(state.get("conversation_context")),
                     ),
                     "agent_handoff": _build_agent_handoff(
                         from_agent="Reviewer Agent",
                         to_agent=(
-                            "User Input Gate"
+                            "Knowledge Gap Finalizer"
+                            if retry_suppressed and _should_finalize_without_user_input(
+                                issue_type,
+                                has_conversation_context=bool(state.get("conversation_context")),
+                            )
+                            else "User Input Gate"
                             if retry_suppressed
                             else ("Notification Agent" if score >= threshold else "Processor Agent")
                         ),
@@ -587,16 +707,23 @@ async def review(state: TicketState) -> dict:
                 })
                 return {
                     "review_score": score,
-                    "review_should_retry": bool(result.get("should_retry", score < threshold)),
+                    "review_should_retry": should_retry,
                     "review_retry_suppressed": retry_suppressed,
                     "review_issue_type": issue_type,
                     "clarification_request": clarification_request,
+                    "review_feedback": str(result.get("feedback") or ""),
+                    "review_issues": result.get("issues", []),
+                    "review_suggestion": str(result.get("suggestion") or ""),
                     "status": "reviewing",
                     "messages": state["messages"]
                     + [
                         {
                             "role": "reviewer",
-                            "content": _format_review_feedback(result, threshold),
+                            "content": _format_review_feedback(
+                                result,
+                                threshold,
+                                has_conversation_context=bool(state.get("conversation_context")),
+                            ),
                         }
                     ],
                 }
@@ -764,6 +891,87 @@ def _build_user_input_processing_result(issue_type: str, request_text: str) -> s
     )
 
 
+async def finalize_knowledge_gap(state: TicketState) -> dict:
+    """知识盲区收敛节点：无命中给暂无答案，有相关命中给参考答复并归档。"""
+    _restore_trace_context(state)
+    with log_context(agent="knowledge_gap_finalizer"):
+        result_text = _build_final_knowledge_gap_result(state)
+        async with _span(
+            "finalize_knowledge_gap",
+            input_data={
+                "issue_type": state.get("review_issue_type"),
+                "has_conversation_context": bool(state.get("conversation_context")),
+            },
+        ) as span:
+            span.set_output({
+                "status": "processing",
+                "result_length": len(result_text),
+            })
+
+        return {
+            "processing_result": result_text,
+            "review_should_retry": False,
+            "review_retry_suppressed": False,
+            "clarification_request": None,
+            "status": "processing",
+            "messages": state["messages"]
+            + [
+                {
+                    "role": "system",
+                    "content": "知识盲区已收敛处理，已停止重复追问并生成最终答复。",
+                }
+            ],
+        }
+
+
+def _build_final_knowledge_gap_result(state: TicketState) -> str:
+    """生成知识盲区最终答复；若有相关命中，保留参考价值而不纯说不知道。"""
+    content = str(state.get("content") or "").strip()
+    feedback = str(state.get("review_feedback") or "").strip()
+    issue_text = _join_text_list(state.get("review_issues"))
+    context = str(state.get("conversation_context") or "").strip()
+    reference_text = _summarize_references(state.get("references"), max_length=520)
+
+    if reference_text:
+        lines = [
+            "您好，知识库命中了相关资料，但还没有覆盖到完全精确的业务细则。",
+            "",
+            f"知识库参考：{reference_text}",
+            "",
+            "可先按以下方向处理：",
+            "1. 先确认本次咨询的产品/平台、账号权限、应用类型和业务场景是否与知识库片段一致。",
+            "2. 对接或配置类问题，重点核对 Key/Secret、应用标识、白名单、服务开通状态和接口返回码。",
+            "3. 流程或规则类问题，重点核对适用账号范围、入口路径、审批要求和最新业务规则。",
+            "",
+            "需要人工确认：具体后台入口、平台专属字段名称、账号权限和公司内部处理规则。",
+            "确认后建议补充进知识库，后续 Agent 可直接给出精确步骤。",
+        ]
+        if content:
+            lines.extend(["", f"本次咨询：{content[:160]}"])
+        if context:
+            lines.extend(["", f"已收到补充：{context[-180:]}"])
+        if issue_text or feedback:
+            lines.extend(["", f"审核结论：{issue_text or feedback}"])
+        return "\n".join(lines)
+
+    lines = [
+        "您好，知识库暂时没有收录该问题的明确答案。",
+        "",
+        "当前知识库无法确认具体平台入口、报销路径或操作规则，因此不会继续猜测平台名称、URL 或流程。",
+    ]
+    if content:
+        lines.extend(["", f"本次咨询：{content[:160]}"])
+    if context:
+        lines.extend(["", f"已收到补充：{context[-180:]}"])
+    if issue_text or feedback:
+        lines.extend(["", f"审核结论：{issue_text or feedback}"])
+    lines.extend([
+        "",
+        "建议后续将对应业务入口、适用账号范围、平台路径和处理规则补充进知识库后，再由 Agent 自动回答。",
+    ])
+    return "\n".join(lines)
+
+
 async def complete(state: TicketState) -> dict:
     """归档节点：标记工单状态为已完成。"""
     _restore_trace_context(state)
@@ -839,15 +1047,23 @@ def route_decision(state: TicketState) -> Literal["auto_reply", "escalate", "pro
     return "process"
 
 
-def review_decision(state: TicketState) -> Literal["notify", "retry_check", "request_user_input"]:
+def review_decision(
+    state: TicketState,
+) -> Literal["notify", "retry_check", "request_user_input", "finalize_knowledge_gap"]:
     """审核决策：根据评分决定是否通过。
 
-    - 知识盲区/信息不足 -> request_user_input（停止无效重试）
+    - 知识库缺失/范围外 -> finalize_knowledge_gap（停止追问并归档暂无答案）
+    - 用户描述信息不足 -> request_user_input（等待用户补充）
     - score >= 阈值 -> notify（通过）
     - score < 阈值 -> retry_check（重试检查）
     """
     score = state.get("review_score", 0.0)
     if state.get("review_retry_suppressed"):
+        if _should_finalize_without_user_input(
+            state.get("review_issue_type"),
+            has_conversation_context=bool(state.get("conversation_context")),
+        ):
+            return "finalize_knowledge_gap"
         return "request_user_input"
     if state.get("review_should_retry"):
         return "retry_check"
@@ -856,12 +1072,15 @@ def review_decision(state: TicketState) -> Literal["notify", "retry_check", "req
     return "retry_check"
 
 
-def retry_decision(state: TicketState) -> Literal["process", "human_review_wait"]:
+def retry_decision(state: TicketState) -> Literal["process", "human_review_wait", "notify"]:
     """重试决策：检查重试次数是否已达上限。
 
+    - auto_finalized_review_failure -> notify（低风险咨询安全兜底完成）
     - retry_count < max_retries -> process（重试）
     - retry_count >= max_retries -> human_review_wait（转人工审核）
     """
+    if state.get("auto_finalized_review_failure"):
+        return "notify"
     retry_count = state.get("retry_count", 0)
     if retry_count < _get_settings().max_retries:
         return "process"
@@ -876,6 +1095,7 @@ def retry_decision(state: TicketState) -> Literal["process", "human_review_wait"
 async def retry_check(state: TicketState) -> dict:
     """重试检查节点：递增重试计数，并记录决策点。
 
+    若低风险咨询出现可修复但反复影响演示的质检问题，生成安全兜底答复并归档；
     若 retry_count 已达上限（即将进入 human_review_wait），
     预置 trigger_type=review_failed 供人工审核节点使用。
     """
@@ -883,11 +1103,26 @@ async def retry_check(state: TicketState) -> dict:
     with log_context(agent="retry_check"):
         new_retry = state.get("retry_count", 0) + 1
         max_retries = _get_settings().max_retries
-        will_escalate = new_retry >= max_retries
+        auto_finalize = _should_auto_finalize_review_failure(state)
+        will_escalate = not auto_finalize and new_retry >= max_retries
         result: dict[str, Any] = {
             "retry_count": new_retry,
             "review_score": None,  # 重置评分，等待重新审核
         }
+        if auto_finalize:
+            safe_result = _build_auto_finalized_result(state)
+            result.update({
+                "processing_result": safe_result,
+                "review_score": max(_get_settings().review_threshold, 0.72),
+                "review_should_retry": False,
+                "auto_finalized_review_failure": True,
+                "status": "processing",
+                "messages": state["messages"]
+                + [{
+                    "role": "system",
+                    "content": "低风险咨询质检未通过，已生成演示安全版答复并停止重复返工。",
+                }],
+            })
         if will_escalate:
             result["trigger_type"] = state.get("trigger_type") or "review_failed"
             result["trigger_reason"] = (
@@ -898,20 +1133,33 @@ async def retry_check(state: TicketState) -> dict:
         # 决策点埋点：retry vs escalate 的边界判断
         async with _span(
             "retry_check",
-            input_data={"retry_count": new_retry, "max_retries": max_retries},
+            input_data={
+                "retry_count": new_retry,
+                "max_retries": max_retries,
+                "auto_finalize": auto_finalize,
+            },
         ) as span:
-            span.set_output({"will_escalate": will_escalate})
+            span.set_output({
+                "will_escalate": will_escalate,
+                "auto_finalized": auto_finalize,
+            })
             span.set_metadata({"decision": {
                 "decision_type": "boundary",
                 "trigger": {
                     "retry_count": new_retry,
                     "max_retries": max_retries,
                     "review_score": state.get("review_score"),
+                    "auto_finalize": auto_finalize,
                 },
                 "options": [
                     {
+                        "value": "auto_finalize",
+                        "score": 1.0 if auto_finalize else 0.0,
+                        "reason": "低风险咨询质检失败，生成安全答复并归档",
+                    },
+                    {
                         "value": "retry",
-                        "score": 0.0 if will_escalate else 1.0,
+                        "score": 0.0 if will_escalate or auto_finalize else 1.0,
                         "reason": f"retry_count={new_retry} < max={max_retries}",
                     },
                     {
@@ -921,12 +1169,76 @@ async def retry_check(state: TicketState) -> dict:
                     },
                 ],
                 "selection": {
-                    "value": "escalate" if will_escalate else "retry",
+                    "value": "auto_finalize" if auto_finalize else ("escalate" if will_escalate else "retry"),
                     "confidence": 1.0,
-                    "reason": "硬阈值",
+                    "reason": "演示安全兜底" if auto_finalize else "硬阈值",
                 },
             }})
         return result
+
+
+def _should_auto_finalize_review_failure(state: TicketState) -> bool:
+    """判断质检失败是否可用安全答复自动闭环，避免演示频繁转人工。"""
+    if state.get("review_retry_suppressed"):
+        return False
+    if not state.get("review_should_retry"):
+        return False
+    if state.get("requires_human_review"):
+        return False
+    category = state.get("category")
+    priority = state.get("priority")
+    risk_level = state.get("risk_level")
+    if category != TicketCategory.INQUIRY.value:
+        return False
+    if priority not in {TicketPriority.P2.value, TicketPriority.P3.value, None}:
+        return False
+    if risk_level not in {"low", None}:
+        return False
+    return True
+
+
+def _build_auto_finalized_result(state: TicketState) -> str:
+    """为低风险咨询生成不含占位地址的演示安全答复。"""
+    content = str(state.get("content") or "").strip()
+    issue_text = _join_text_list(state.get("review_issues"))
+
+    lines = [
+        "您好，知识库暂时没有收录该问题的明确答案。",
+        "",
+        "我无法仅凭当前知识库确认具体平台入口、报销路径或操作规则，因此不会猜测平台名称、URL 或流程。",
+    ]
+    if content:
+        lines.extend(["", f"本次咨询：{content[:160]}"])
+    if issue_text:
+        lines.extend(["", f"质量审核提示：{issue_text}"])
+    lines.extend([
+        "",
+        "建议补充：产品/服务所属平台、账号类型、订单或套餐截图、公司内部报销要求；补充后 Agent 会继续检索并处理。",
+    ])
+    return "\n".join(lines)
+
+
+def _join_text_list(value: object) -> str:
+    """把列表型审核问题合并为短文本。"""
+    if not isinstance(value, list):
+        return ""
+    return "；".join(str(item).strip() for item in value if str(item).strip())
+
+
+def _summarize_references(references: object, max_length: int = 180) -> str:
+    """压缩引用文本，避免把长知识库片段塞进最终答复。"""
+    if not isinstance(references, list) or not references:
+        return ""
+    valid_items = [
+        str(item).strip()
+        for item in references
+        if str(item).strip() and "未检索到相关知识片段" not in str(item)
+    ]
+    text = " ".join(valid_items)
+    if not text:
+        return ""
+    text = " ".join(text.split())
+    return text if len(text) <= max_length else f"{text[:max_length].rstrip()}..."
 
 
 # ============================================================
@@ -1285,6 +1597,7 @@ def build_ticket_graph(
     graph.add_node("handle_failure", handle_failure)
     graph.add_node("retry_check", retry_check)
     graph.add_node("request_user_input", request_user_input)
+    graph.add_node("finalize_knowledge_gap", finalize_knowledge_gap)
     graph.add_node("human_review_wait", human_review_wait)
     graph.add_node("apply_human_decision", apply_human_decision)
 
@@ -1313,6 +1626,7 @@ def build_ticket_graph(
 
     # 知识盲区/信息不足时暂停，等待用户补充后由用户补充入口恢复
     graph.add_edge("request_user_input", END)
+    graph.add_edge("finalize_knowledge_gap", "notify")
 
     # 人工决策恢复节点：按决策路由到 notify | process | complete
     graph.add_conditional_edges("apply_human_decision", human_decision_router)
@@ -1339,6 +1653,7 @@ def _build_resume_subgraph() -> Any:
     graph.add_node("notify", notify)
     graph.add_node("complete", complete)
     graph.add_node("request_user_input", request_user_input)
+    graph.add_node("finalize_knowledge_gap", finalize_knowledge_gap)
     graph.add_edge(START, "apply_human_decision")
     graph.add_conditional_edges("apply_human_decision", human_decision_router)
     graph.add_edge("process", "review")
@@ -1348,6 +1663,7 @@ def _build_resume_subgraph() -> Any:
     graph.add_node("human_review_wait", human_review_wait)
     graph.add_edge("human_review_wait", END)
     graph.add_edge("request_user_input", END)
+    graph.add_edge("finalize_knowledge_gap", "notify")
     graph.add_edge("notify", "complete")
     graph.add_edge("complete", END)
     return graph.compile()
@@ -1360,6 +1676,7 @@ def _build_user_input_resume_subgraph() -> Any:
     graph.add_node("review", review)
     graph.add_node("retry_check", retry_check)
     graph.add_node("request_user_input", request_user_input)
+    graph.add_node("finalize_knowledge_gap", finalize_knowledge_gap)
     graph.add_node("human_review_wait", human_review_wait)
     graph.add_node("notify", notify)
     graph.add_node("complete", complete)
@@ -1368,6 +1685,7 @@ def _build_user_input_resume_subgraph() -> Any:
     graph.add_conditional_edges("review", review_decision)
     graph.add_conditional_edges("retry_check", retry_decision)
     graph.add_edge("request_user_input", END)
+    graph.add_edge("finalize_knowledge_gap", "notify")
     graph.add_edge("human_review_wait", END)
     graph.add_edge("notify", "complete")
     graph.add_edge("complete", END)
@@ -1390,6 +1708,7 @@ def _build_resume_state(
         review_retry_suppressed=None,
         review_issue_type=None,
         clarification_request=None,
+        auto_finalized_review_failure=None,
         retry_count=ticket.get("retry_count", 0) or 0,
         status=ticket.get("status", "pending_human_review"),
         messages=[],
@@ -1420,6 +1739,7 @@ async def _build_user_input_resume_state(
         review_retry_suppressed=None,
         review_issue_type=None,
         clarification_request=None,
+        auto_finalized_review_failure=None,
         retry_count=0,
         status="processing",
         messages=[],

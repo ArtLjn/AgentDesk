@@ -282,7 +282,7 @@ class TestReviewerAgent:
 
     @pytest.mark.asyncio
     async def test_review_knowledge_grounded_result_still_uses_llm_quality_gate(self):
-        """已引用知识库的处理结果仍应交给 Reviewer LLM 做独立质检。"""
+        """已引用知识库且分数达标时，Reviewer 建议不应强制返工。"""
         mock_response = _make_mock_response({
             "score": 0.86,
             "feedback": "答案引用了知识库，但还需要提醒用户确认券有效期。",
@@ -311,12 +311,12 @@ class TestReviewerAgent:
         assert result["dimensions"]["accuracy"] == 0.25
         assert result["issues"] == ["未提醒确认优惠券有效期"]
         assert result["suggestion"] == "补充有效期和适用范围检查步骤"
-        assert result["should_retry"] is True
+        assert result["should_retry"] is False
         mock_client.chat_completions_create.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_review_blocks_result_when_issues_present(self):
-        """Reviewer 发现必须修正的问题时，即使分数达标也应打回返工。"""
+        """Reviewer 明确判断需要返工时，即使分数达标也应打回。"""
         mock_response = _make_mock_response({
             "score": 0.85,
             "feedback": "整体可用，但缺少业务拒绝规则说明。",
@@ -328,7 +328,7 @@ class TestReviewerAgent:
             },
             "issues": ["缺少对具体业务拒绝规则的直接说明"],
             "suggestion": "补充试用版申请被拒的常见业务限制条件",
-            "should_retry": False,
+            "should_retry": True,
         })
         mock_client = _make_mock_client(mock_response)
 

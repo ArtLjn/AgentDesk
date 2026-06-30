@@ -44,6 +44,9 @@ _REACT_SYSTEM_PROMPT = """\
 - 每个 Thought 必须基于已有信息
 - 工具参数必须严格符合 Schema
 - 如果附加上下文包含“知识库预检索结果”且检索到知识片段，最终答案必须优先依据这些知识片段
+- 如果知识库命中相关片段但没有覆盖精确入口、URL、命令或平台细则，请基于片段给出通用核对步骤，并标明需要人工确认的具体细则
+- 只有完全没有相关知识片段时，才说明“知识库暂时没有收录该问题的明确答案”
+- 不要编造平台、入口、URL、命令或流程
 - 如果已有足够信息，直接给出 Final Answer
 - 不要同时输出 Action 和 Final Answer；需要工具时只输出 Action，已有答案时只输出 Final Answer
 - Final Answer 使用纯文本格式：Final Answer: 你的完整答复
@@ -387,14 +390,9 @@ class ReActProcessorAgent:
     ) -> dict:
         """处理模型不可用时，优先用知识库检索结果生成基础答复。"""
         knowledge_context = await self._prefetch_knowledge(content, category)
-        if knowledge_context and "未检索到相关知识片段" not in knowledge_context:
+        if self._is_valid_reference(knowledge_context):
             return {
-                "result": (
-                    "您好，已根据知识库中与该问题相关的规则整理如下：\n\n"
-                    f"{knowledge_context}\n\n"
-                    "建议您优先按上述知识片段核对适用条件、操作步骤和限制说明；"
-                    "如仍无法解决，请补充具体对象、操作路径和异常截图，方便客服继续核查。"
-                ),
+                "result": self._build_related_knowledge_guidance(knowledge_context),
                 "references": [knowledge_context],
             }
         return await fallback_registry.execute(
@@ -500,16 +498,10 @@ class ReActProcessorAgent:
         """连续无动作时基于已有上下文生成兜底答复，避免 ReAct 空转。"""
         valid_references = [
             reference for reference in references
-            if reference and "未检索到相关知识片段" not in reference
+            if self._is_valid_reference(reference)
         ]
         if valid_references:
-            reference_text = self._compact_reference(valid_references[0])
-            return (
-                "您好，已根据知识库中与该问题相关的信息整理如下：\n\n"
-                f"{reference_text}\n\n"
-                "建议您优先按上述内容核对适用条件、操作步骤和限制说明；"
-                "如仍无法解决，请补充具体对象、操作路径和异常截图，方便继续核查。"
-            )
+            return self._build_related_knowledge_guidance(valid_references[0])
 
         if thought:
             return (
@@ -524,12 +516,32 @@ class ReActProcessorAgent:
             "请补充具体现象、操作路径和截图，我们会据此继续核查处理。"
         )
 
+    def _build_related_knowledge_guidance(self, reference: str) -> str:
+        """基于相关知识命中生成可展示答复，避免把部分命中误判为完全未知。"""
+        reference_text = self._compact_reference(reference)
+        return (
+            "您好，知识库命中了相关资料，但还没有覆盖到完全精确的业务细则。"
+            "可先参考以下处理建议：\n\n"
+            f"知识库参考：{reference_text}\n\n"
+            "建议先核对：\n"
+            "1. 确认产品或平台、应用类型、账号权限与本次咨询对象是否一致。\n"
+            "2. 对接或配置类问题，优先核对 Key/Secret、应用标识、白名单、服务开通状态和接口返回码。\n"
+            "3. 流程或规则类问题，优先核对适用账号范围、入口路径、审批要求和最新业务规则。\n\n"
+            "需要人工确认：具体后台入口、平台专属字段名称、账号权限和公司内部处理规则；"
+            "确认后可补充进知识库，后续由 Agent 直接回答。"
+        )
+
     def _compact_reference(self, reference: str, max_length: int = 800) -> str:
         """压缩知识库引用，避免把过长检索上下文原样塞进答复。"""
         compacted = re.sub(r"\s+", " ", reference).strip()
         if len(compacted) <= max_length:
             return compacted
         return f"{compacted[:max_length].rstrip()}..."
+
+    def _is_valid_reference(self, reference: object) -> bool:
+        """判断引用是否是真实知识命中，而不是空结果提示。"""
+        text = str(reference or "").strip()
+        return bool(text and "未检索到相关知识片段" not in text)
 
     def _extract_action(
         self,

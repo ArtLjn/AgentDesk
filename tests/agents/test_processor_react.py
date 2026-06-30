@@ -22,6 +22,22 @@ class MockSearchTool(ToolBase):
         return "Knowledge base unavailable"
 
 
+class MapKnowledgeSearchTool(ToolBase):
+    name = "search_knowledge"
+    description = "Search knowledge base"
+    params_model = MockSearchParams
+
+    async def execute(self, query: str) -> str:
+        return (
+            "检索到以下知识片段：1. 标题: 地图服务；分类: integration-map；相似度: 0.747 "
+            "内容: 集成高德、百度或腾讯地图 SDK 时，应检查 MAP_KEY、MAP_SECRET、"
+            "包名、Bundle ID、域名 Referer 白名单、服务开通状态和接口返回码。"
+        )
+
+    async def fallback(self, query: str) -> str:
+        return "Knowledge base unavailable"
+
+
 @pytest.fixture
 def mock_client():
     client = MagicMock()
@@ -193,6 +209,28 @@ async def test_react_processor_fallback_uses_prefetched_knowledge(mock_client):
 
     assert "Knowledge about 咨询一下平台优惠券如何使用" in result["result"]
     assert result["references"] == ["Knowledge about 咨询一下平台优惠券如何使用"]
+
+
+@pytest.mark.asyncio
+async def test_react_processor_fallback_with_related_knowledge_is_not_unknown(mock_client):
+    """有相关知识库命中时，降级答复应给参考建议，而不是直接说暂无答案。"""
+    tool = MapKnowledgeSearchTool()
+    registry = ToolRegistry()
+    registry.register(tool)
+    agent = ReActProcessorAgent(
+        model="test-model",
+        tool_registry=registry,
+        client=mock_client,
+    )
+    mock_client.chat_completions_create = AsyncMock(side_effect=Exception("LLM 502"))
+
+    result = await agent.process("咨询高德地图SDK配置及白名单规则", "inquiry", "P3")
+
+    assert "知识库命中了相关资料" in result["result"]
+    assert "地图服务" in result["result"]
+    assert "白名单" in result["result"]
+    assert "人工确认" in result["result"]
+    assert "知识库暂时没有收录该问题的明确答案" not in result["result"]
 
 
 @pytest.mark.asyncio
