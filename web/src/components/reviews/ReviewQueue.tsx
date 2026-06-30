@@ -15,7 +15,7 @@ interface Props {
 
 export function ReviewQueue({ items, selectedId, loading, error, onSelect, onRefresh }: Props) {
   return (
-    <div className="flex h-full flex-col">
+    <div className="flex h-full min-h-0 flex-col">
       <div className="flex items-center justify-between px-1 pb-2">
         <h3 className="text-sm font-semibold">
           待审核队列
@@ -28,7 +28,7 @@ export function ReviewQueue({ items, selectedId, loading, error, onSelect, onRef
         </Button>
       </div>
 
-      <div className="flex-1 space-y-2 overflow-y-auto pr-1">
+      <div className="min-h-0 flex-1 space-y-2 overflow-y-auto pr-1">
         {loading ? (
           Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-24 rounded-lg" />)
         ) : error ? (

@@ -130,7 +130,7 @@ export function ReviewWorkbench() {
 
       <div className="grid grid-cols-12 items-start gap-4">
         {/* 左栏：筛选与待审队列 */}
-        <aside className="col-span-3 flex flex-col gap-3">
+        <aside className="col-span-3 flex min-h-0 flex-col gap-3">
           {/* 筛选器 */}
           <div className="rounded-lg border border-border bg-card p-3 space-y-2">
             <p className="text-[10px] uppercase tracking-wide text-muted-foreground">筛选器</p>
@@ -172,7 +172,7 @@ export function ReviewWorkbench() {
             </Select>
           </div>
 
-          <div className="max-h-[calc(100vh-360px)] min-h-[360px] overflow-hidden">
+          <div className="h-[calc(100vh-300px)] min-h-[420px] overflow-hidden">
             <ReviewQueue
               items={queue}
               selectedId={effectiveSelectedId}
