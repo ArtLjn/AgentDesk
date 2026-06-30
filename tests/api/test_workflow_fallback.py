@@ -6,7 +6,7 @@
 """
 
 import logging
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from loguru import logger as loguru_logger
@@ -57,6 +57,7 @@ def fallback_app():
     app.state.db_manager = MagicMock()
     app.state.db_manager.create_pending_review = AsyncMock(return_value=None)
     app.state.coordinator = None  # 跳过 AI 建议
+    app.state.settings = MagicMock(workflow_node_delay_seconds=0.0)
     # _run_workflow 主流程中 trace_manager 检查路径需要 falsy 跳过
     app.state.trace_manager = None
     # get_pending_review_by_ticket 在 review_requested 广播中被 await，返回 None 即可
@@ -142,6 +143,28 @@ class TestSafeFallback:
 
 class TestRunWorkflowIntegration:
     """_run_workflow 异常分支端到端验证。"""
+
+    @pytest.mark.asyncio
+    async def test_run_workflow_waits_between_nodes_for_demo(self, fallback_app):
+        """配置演示延迟后，节点广播完成后应暂停，方便前端展示执行过程。"""
+        fallback_app.state.settings.workflow_node_delay_seconds = 1.2
+
+        with patch(
+            "src.multi_agent_system.api.routes.asyncio.sleep",
+            new_callable=AsyncMock,
+        ) as sleep_mock:
+            await _run_workflow(
+                fallback_app,
+                "T-FALLBACK",
+                {
+                    "ticket_id": "T-FALLBACK",
+                    "content": "测试工单",
+                    "status": "processing",
+                    "__trace_id__": None,
+                },
+            )
+
+        sleep_mock.assert_awaited_once_with(1.2)
 
     @pytest.mark.asyncio
     async def test_run_workflow_exception_triggers_safe_fallback(self, fallback_app):

@@ -16,6 +16,10 @@ class TicketState(TypedDict):
         processing_result: 处理Agent的输出结果
         references: 处理过程中使用的知识库引用
         review_score: 审核评分，范围 0-1
+        review_should_retry: Reviewer 是否建议返工
+        review_retry_suppressed: Reviewer 判断该问题无法通过重试修复
+        review_issue_type: Reviewer 问题类型（fixable/knowledge_gap/needs_clarification/out_of_scope）
+        clarification_request: 面向用户的补充信息请求
         retry_count: 重试次数，默认 0，上限 3
         status: 当前状态（received/classifying/processing/reviewing/completed/failed）
         messages: Agent 间通信上下文列表
@@ -38,6 +42,10 @@ class TicketState(TypedDict):
     processing_result: str | None
     references: list[str]
     review_score: float | None
+    review_should_retry: bool | None
+    review_retry_suppressed: bool | None
+    review_issue_type: str | None
+    clarification_request: str | None
     retry_count: int
     status: str
     messages: list[dict]

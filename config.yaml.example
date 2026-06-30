@@ -66,6 +66,7 @@ max_retries: 3
 retry_backoff_base: 2.0
 max_concurrency: 5
 review_threshold: 0.7
+workflow_node_delay_seconds: 0.8  # 演示用节点间延时；设为 0 可恢复最快处理
 checkpoint_ttl: 86400         # 秒，24h
 
 # ---------------------------------------------------------------------------

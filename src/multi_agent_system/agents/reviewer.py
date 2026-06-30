@@ -21,15 +21,19 @@ _REVIEWER_SYSTEM_PROMPT = """\
 处理结果：{processing_result}
 
 评审标准：
-1. 准确性（0-0.3）：处理结果是否准确回答了工单中的问题
+1. 准确性（0-0.3）：处理结果是否准确回答了工单中的问题，是否和知识库依据一致
 2. 可行性（0-0.3）：解决方案是否切实可行、步骤清晰
 3. 完整性（0-0.2）：是否覆盖了工单中提到的所有要点
 4. 专业性（0-0.2）：语言是否清晰、专业、无歧义
 
-请综合以上维度给出总分（0-1），并提供改进反馈。
+请综合以上维度给出总分（0-1），指出潜在问题，并判断是否建议返工。
+如果问题是知识库未覆盖、用户描述不明确、缺少必要上下文等“重新生成也无法修复”的情况，
+请将 issue_type 标为 knowledge_gap 或 needs_clarification，并将 should_retry 设为 false。
 严格按以下 JSON 格式输出，不要添加任何额外内容：
-{{"score": 0.85, "feedback": "评分理由和改进建议"}}\
+{{"score": 0.85, "feedback": "评分理由", "dimensions": {{"accuracy": 0.27, "feasibility": 0.26, "completeness": 0.16, "professionalism": 0.16}}, "issues": ["发现的问题，没有则为空数组"], "suggestion": "改进建议", "should_retry": false, "issue_type": "none|fixable|knowledge_gap|needs_clarification|out_of_scope"}}\
 """
+
+_NON_RETRYABLE_ISSUE_TYPES = {"knowledge_gap", "needs_clarification", "out_of_scope"}
 
 
 class ReviewerAgent:
@@ -88,12 +92,6 @@ class ReviewerAgent:
         Returns:
             包含 score（0-1）和 feedback 的字典
         """
-        if "检索到以下知识片段" in processing_result:
-            logger.info("[Reviewer] 处理结果包含知识库引用，使用本地审核通过规则")
-            return {
-                "score": 0.82,
-                "feedback": "处理结果已引用知识库片段，具备基础准确性和可执行性",
-            }
         return await self._review_by_llm(content, processing_result, category)
 
     @with_retry(
@@ -161,11 +159,168 @@ class ReviewerAgent:
         score = float(result.get("score", 0.7))
         # 确保 score 在 0-1 范围内
         score = max(0.0, min(1.0, score))
+        dimensions = self._normalize_dimensions(result.get("dimensions"))
+        issues = result.get("issues")
+        if not isinstance(issues, list):
+            issues = []
+        clean_issues = [str(issue).strip() for issue in issues if str(issue).strip()]
+        suggestion = str(result.get("suggestion") or "")
+        feedback = str(result.get("feedback") or "")
+        issue_type = self._resolve_issue_type(
+            result.get("issue_type"),
+            clean_issues,
+            feedback,
+            suggestion,
+            content,
+            processing_result,
+        )
+        retry_suppressed = issue_type in _NON_RETRYABLE_ISSUE_TYPES
+
+        should_retry = False if retry_suppressed else bool(
+            result.get("should_retry")
+            or clean_issues
+            or score < Settings().review_threshold
+        )
 
         return {
             "score": score,
-            "feedback": result.get("feedback", ""),
+            "feedback": feedback,
+            "dimensions": dimensions,
+            "issues": clean_issues,
+            "suggestion": suggestion,
+            "should_retry": should_retry,
+            "issue_type": issue_type,
+            "retry_suppressed": retry_suppressed,
+            "clarification_request": self._build_clarification_request(
+                issue_type,
+                clean_issues,
+                suggestion,
+                content,
+            ),
         }
+
+    @staticmethod
+    def _normalize_dimensions(value: object) -> dict[str, float]:
+        """标准化四维质检分，避免 LLM 缺字段导致前端展示不完整。"""
+        raw = value if isinstance(value, dict) else {}
+        max_scores = {
+            "accuracy": 0.3,
+            "feasibility": 0.3,
+            "completeness": 0.2,
+            "professionalism": 0.2,
+        }
+        normalized: dict[str, float] = {}
+        for key, max_score in max_scores.items():
+            try:
+                score = float(raw.get(key, 0.0))
+            except (TypeError, ValueError):
+                score = 0.0
+            normalized[key] = round(max(0.0, min(max_score, score)), 4)
+        return normalized
+
+    @classmethod
+    def _resolve_issue_type(
+        cls,
+        raw_issue_type: object,
+        issues: list[str],
+        feedback: str,
+        suggestion: str,
+        content: str,
+        processing_result: str,
+    ) -> str:
+        """识别问题类型，区分可返工修复与知识盲区/信息不足。"""
+        normalized = cls._normalize_issue_type(raw_issue_type)
+        if normalized != "none":
+            return normalized
+
+        review_text = " ".join([*issues, feedback, suggestion, content, processing_result])
+        inferred = cls._infer_non_retryable_issue_type(review_text)
+        if inferred:
+            return inferred
+        if issues:
+            return "fixable"
+        return "none"
+
+    @staticmethod
+    def _normalize_issue_type(value: object) -> str:
+        """标准化 LLM 输出的问题类型，兼容中文/英文表述。"""
+        raw = str(value or "").strip().lower()
+        if raw in {"none", "fixable", "knowledge_gap", "needs_clarification", "out_of_scope"}:
+            return raw
+        if raw in {"knowledge gap", "knowledge-gap", "知识盲区", "知识库盲区", "知识库未覆盖"}:
+            return "knowledge_gap"
+        if raw in {"clarification", "need_clarification", "needs clarification", "信息不足", "需要补充"}:
+            return "needs_clarification"
+        if raw in {"out of scope", "out-of-scope", "超出范围", "范围外"}:
+            return "out_of_scope"
+        return "none"
+
+    @staticmethod
+    def _infer_non_retryable_issue_type(text: str) -> str | None:
+        """从审核文本中推断不可通过重试解决的问题类型。"""
+        lower_text = text.lower()
+        knowledge_gap_keywords = (
+            "知识库未覆盖",
+            "知识库暂无",
+            "知识库没有",
+            "知识库盲区",
+            "知识盲区",
+            "未检索到",
+            "没有检索到",
+            "无相关知识",
+            "现有知识库",
+            "超出知识库",
+            "not covered",
+            "no relevant knowledge",
+            "knowledge gap",
+        )
+        clarification_keywords = (
+            "问题模糊",
+            "描述不明确",
+            "描述过于笼统",
+            "信息不足",
+            "必要信息不足",
+            "无法判断",
+            "无法确认",
+            "需要用户补充",
+            "请用户补充",
+            "需用户补充",
+            "need clarification",
+            "needs clarification",
+        )
+        out_of_scope_keywords = (
+            "超出支持范围",
+            "不在支持范围",
+            "out of scope",
+        )
+        if any(keyword in lower_text for keyword in knowledge_gap_keywords):
+            return "knowledge_gap"
+        if any(keyword in lower_text for keyword in clarification_keywords):
+            return "needs_clarification"
+        if any(keyword in lower_text for keyword in out_of_scope_keywords):
+            return "out_of_scope"
+        return None
+
+    @staticmethod
+    def _build_clarification_request(
+        issue_type: str,
+        issues: list[str],
+        suggestion: str,
+        content: str,
+    ) -> str:
+        """为知识盲区/信息不足构造面向用户的补充说明。"""
+        if issue_type == "knowledge_gap":
+            detail = suggestion or "请补充具体业务场景、系统名称、接口类型、报错信息或期望操作结果。"
+            return f"当前知识库未覆盖该问题的可靠处理方案。{detail}"
+        if issue_type == "needs_clarification":
+            detail = suggestion or "请补充具体现象、操作步骤、时间点、账号环境或相关截图。"
+            return f"当前问题描述还不够明确，暂时无法生成可靠处理方案。{detail}"
+        if issue_type == "out_of_scope":
+            detail = suggestion or "请确认该问题是否属于当前系统支持范围，或补充关联业务背景。"
+            return f"该问题可能超出当前 Agent 可自动处理范围。{detail}"
+        if issues:
+            return suggestion or f"请补充以下信息：{'；'.join(issues)}"
+        return suggestion or f"请补充与「{content[:40]}」相关的更多上下文。"
 
     @staticmethod
     def _fallback_review() -> dict:
@@ -177,6 +332,18 @@ class ReviewerAgent:
         return {
             "score": 0.7,
             "feedback": "LLM 审核不可用，使用默认评分",
+            "dimensions": {
+                "accuracy": 0.21,
+                "feasibility": 0.21,
+                "completeness": 0.14,
+                "professionalism": 0.14,
+            },
+            "issues": ["Reviewer LLM 不可用，未完成深度质检"],
+            "suggestion": "建议人工复核关键结论后再发送",
+            "should_retry": False,
+            "issue_type": "none",
+            "retry_suppressed": False,
+            "clarification_request": "",
         }
 
     @staticmethod

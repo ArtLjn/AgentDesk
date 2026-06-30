@@ -207,6 +207,32 @@ class TestApplyHumanDecisionNode:
         assert human_decision_router(state) == "notify"
 
     @pytest.mark.asyncio
+    async def test_apply_human_decision_approve_escalation_generates_final_result(self, mock_db_manager):
+        """升级工单人工 approve 后应生成可展示的最终处理结论。"""
+        graph_module._db_manager = mock_db_manager
+        mock_db_manager._pending = {
+            "review_id": "HR-1",
+            "ticket_id": "TK-test-001",
+            "trigger_type": "escalate",
+            "ai_suggestion": None,
+        }
+
+        state = _make_state(
+            processing_result="已升级至人工处理，原因: 网站访问异常影响客户",
+            trigger_type="escalate",
+            trigger_reason="网站访问异常影响客户",
+            __human_decision__=self._decision(
+                "approve",
+                decision_reason="已确认需要按 DNS 区域配置异常排查处理",
+            ),
+        )
+        result = await apply_human_decision(state)
+
+        assert result["processing_result"]
+        assert "人工审核已通过" in result["processing_result"]
+        assert "DNS" in result["processing_result"]
+
+    @pytest.mark.asyncio
     async def test_apply_human_decision_rewrite(self, mock_db_manager):
         """rewrite 覆盖 processing_result，路由到 notify。"""
         graph_module._db_manager = mock_db_manager

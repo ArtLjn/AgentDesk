@@ -45,7 +45,39 @@ class _StaticClassifierAgent:
 
 class _StaticReviewerAgent:
     async def review(self, content: str, processing_result: str, category: str) -> dict:
-        return {"score": 0.9, "feedback": "引用知识库，回复可用"}
+        return {
+            "score": 0.9,
+            "feedback": "引用知识库，回复可用",
+            "dimensions": {
+                "accuracy": 0.28,
+                "feasibility": 0.27,
+                "completeness": 0.17,
+                "professionalism": 0.18,
+            },
+            "issues": [],
+            "suggestion": "保持当前回复",
+            "should_retry": False,
+        }
+
+
+class _KnowledgeGapReviewerAgent:
+    async def review(self, content: str, processing_result: str, category: str) -> dict:
+        return {
+            "score": 0.55,
+            "feedback": "现有知识库未覆盖该接入流程。",
+            "dimensions": {
+                "accuracy": 0.12,
+                "feasibility": 0.12,
+                "completeness": 0.08,
+                "professionalism": 0.16,
+            },
+            "issues": ["知识库未覆盖公司模型对接 Claude Code 的具体步骤"],
+            "suggestion": "请用户补充模型类型、接口协议和账号环境。",
+            "should_retry": False,
+            "issue_type": "knowledge_gap",
+            "retry_suppressed": True,
+            "clarification_request": "当前知识库未覆盖该模型对接流程，请补充模型类型、接口协议和账号环境。",
+        }
 
 
 class _CapturingProcessorAgent:
@@ -157,6 +189,38 @@ class TestTicketWorkflow:
         assert result["status"] == "completed"
         assert result["review_score"] is not None
         assert result["processing_result"] is not None
+
+    @pytest.mark.asyncio
+    async def test_reviewer_message_contains_structured_quality_review(self):
+        """Reviewer 消息应体现独立质检维度，方便前端展示多 Agent 协作。"""
+        graph = build_ticket_graph(agents={"reviewer": _StaticReviewerAgent()})
+
+        result = await graph.ainvoke(create_initial_state("系统报错 ERR-5001"))
+
+        reviewer_messages = [
+            message["content"]
+            for message in result["messages"]
+            if message["role"] == "reviewer"
+        ]
+        assert reviewer_messages
+        assert "准确性" in reviewer_messages[-1]
+        assert "可行性" in reviewer_messages[-1]
+        assert "建议" in reviewer_messages[-1]
+
+    @pytest.mark.asyncio
+    async def test_knowledge_gap_stops_retry_and_requests_user_input(self):
+        """知识库盲区低分时不应反复重试或转人工，应暂停等待用户补充。"""
+        graph = build_ticket_graph(agents={"reviewer": _KnowledgeGapReviewerAgent()})
+
+        result = await graph.ainvoke(create_initial_state("询问一下公司的模型如何进行对接 claude code"))
+
+        assert result["status"] == "waiting_user_input"
+        assert result["retry_count"] == 0
+        assert result["review_retry_suppressed"] is True
+        assert result["review_issue_type"] == "knowledge_gap"
+        assert result["processing_result"] is not None
+        assert "知识库未覆盖" in result["processing_result"]
+        assert any(message["role"] == "system" and "等待用户补充" in message["content"] for message in result["messages"])
 
     @pytest.mark.asyncio
     async def test_billing_ticket_process(self, graph):
@@ -294,6 +358,23 @@ class TestReviewDecision:
         state["review_score"] = 0.5
 
         assert review_decision(state) == "retry_check"
+
+    def test_reviewer_retry_signal_triggers_retry(self):
+        """Reviewer 明确建议返工时，即使分数达标也触发重试检查。"""
+        state = create_initial_state("测试")
+        state["review_score"] = 0.85
+        state["review_should_retry"] = True
+
+        assert review_decision(state) == "retry_check"
+
+    def test_retry_suppressed_routes_to_user_input(self):
+        """不可通过重试修复的问题应走用户补充，不进入重试检查。"""
+        state = create_initial_state("测试")
+        state["review_score"] = 0.55
+        state["review_should_retry"] = False
+        state["review_retry_suppressed"] = True
+
+        assert review_decision(state) == "request_user_input"
 
     def test_exact_threshold_passes(self):
         """评分恰好等于阈值时通过。"""

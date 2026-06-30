@@ -281,9 +281,22 @@ class TestReviewerAgent:
         assert "默认" in result["feedback"]
 
     @pytest.mark.asyncio
-    async def test_review_knowledge_grounded_result_uses_local_rule(self):
-        """已引用知识库的处理结果应快速通过本地审核规则。"""
-        mock_client = _make_mock_client(side_effect=AssertionError("不应调用 LLM"))
+    async def test_review_knowledge_grounded_result_still_uses_llm_quality_gate(self):
+        """已引用知识库的处理结果仍应交给 Reviewer LLM 做独立质检。"""
+        mock_response = _make_mock_response({
+            "score": 0.86,
+            "feedback": "答案引用了知识库，但还需要提醒用户确认券有效期。",
+            "dimensions": {
+                "accuracy": 0.25,
+                "feasibility": 0.24,
+                "completeness": 0.17,
+                "professionalism": 0.20,
+            },
+            "issues": ["未提醒确认优惠券有效期"],
+            "suggestion": "补充有效期和适用范围检查步骤",
+            "should_retry": False,
+        })
+        mock_client = _make_mock_client(mock_response)
 
         agent = ReviewerAgent(model="test-model", api_key="fake")
         agent._client = mock_client
@@ -294,9 +307,70 @@ class TestReviewerAgent:
             "inquiry",
         )
 
-        assert result["score"] == 0.82
-        assert "知识库" in result["feedback"]
-        mock_client.chat_completions_create.assert_not_called()
+        assert result["score"] == 0.86
+        assert result["dimensions"]["accuracy"] == 0.25
+        assert result["issues"] == ["未提醒确认优惠券有效期"]
+        assert result["suggestion"] == "补充有效期和适用范围检查步骤"
+        assert result["should_retry"] is True
+        mock_client.chat_completions_create.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_review_blocks_result_when_issues_present(self):
+        """Reviewer 发现必须修正的问题时，即使分数达标也应打回返工。"""
+        mock_response = _make_mock_response({
+            "score": 0.85,
+            "feedback": "整体可用，但缺少业务拒绝规则说明。",
+            "dimensions": {
+                "accuracy": 0.27,
+                "feasibility": 0.26,
+                "completeness": 0.16,
+                "professionalism": 0.16,
+            },
+            "issues": ["缺少对具体业务拒绝规则的直接说明"],
+            "suggestion": "补充试用版申请被拒的常见业务限制条件",
+            "should_retry": False,
+        })
+        mock_client = _make_mock_client(mock_response)
+
+        agent = ReviewerAgent(model="test-model", api_key="fake")
+        agent._client = mock_client
+
+        result = await agent.review("试用版申请失败咨询", "建议检查网络和浏览器缓存", "inquiry")
+
+        assert result["score"] == 0.85
+        assert result["should_retry"] is True
+
+    @pytest.mark.asyncio
+    async def test_review_suppresses_retry_for_knowledge_gap(self):
+        """知识库盲区不是可重试质量问题，应停止打回并请求补充。"""
+        mock_response = _make_mock_response({
+            "score": 0.55,
+            "feedback": "现有知识库未覆盖公司模型对接 Claude Code 的具体流程。",
+            "dimensions": {
+                "accuracy": 0.12,
+                "feasibility": 0.12,
+                "completeness": 0.08,
+                "professionalism": 0.16,
+            },
+            "issues": ["知识库未覆盖公司模型对接 Claude Code 的具体步骤"],
+            "suggestion": "告知用户知识库暂未覆盖，并请用户补充模型类型、接口协议和账号环境。",
+            "should_retry": True,
+        })
+        mock_client = _make_mock_client(mock_response)
+
+        agent = ReviewerAgent(model="test-model", api_key="fake")
+        agent._client = mock_client
+
+        result = await agent.review(
+            "询问一下公司的模型如何进行对接 claude code",
+            "建议查看模型接入文档并配置 API Key。",
+            "inquiry",
+        )
+
+        assert result["issue_type"] == "knowledge_gap"
+        assert result["retry_suppressed"] is True
+        assert result["should_retry"] is False
+        assert "知识库" in result["clarification_request"]
 
     @pytest.mark.asyncio
     async def test_review_score_clamped(self):

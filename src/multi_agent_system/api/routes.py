@@ -943,6 +943,7 @@ _NODE_LABELS: dict[str, str] = {
     "notify": "发送通知",
     "complete": "归档完成",
     "retry_check": "重试检查",
+    "request_user_input": "等待补充",
     "handle_failure": "失败处理",
 }
 
@@ -1076,6 +1077,13 @@ async def _run_workflow(app: Any, ticket_id: str, state: dict) -> None:
                     node=node_name,
                     data=span_data,
                 )
+                node_delay = getattr(
+                    getattr(app.state, "settings", None),
+                    "workflow_node_delay_seconds",
+                    0,
+                )
+                if node_delay > 0:
+                    await asyncio.sleep(node_delay)
 
                 # 人工审核请求事件：节点标记 __review_requested__ 时广播
                 if node_output.get("__review_requested__"):
