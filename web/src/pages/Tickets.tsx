@@ -1,12 +1,15 @@
 import { useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useTickets, useCreateTicket } from '@/hooks/useApi'
+import { api } from '@/lib/api'
+import { buildKnowledgeMockTicketPrompt } from '@/lib/mockTicketPrompt'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Textarea } from '@/components/ui/textarea'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from '@/components/ui/table'
@@ -14,7 +17,7 @@ import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger,
 } from '@/components/ui/dialog'
 import { StatusBadge, CategoryBadge, PriorityBadge } from '@/components/layout/StatusBadge'
-import type { Ticket } from '@/types'
+import type { KnowledgeDocument, Ticket } from '@/types'
 import {
   Bot, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Loader2, Plus, RefreshCw, Search, SendHorizontal, Sparkles,
 } from 'lucide-react'
@@ -35,6 +38,10 @@ interface AgentTicketComposerProps {
 function AgentTicketComposer({ compact = false, onCreated }: AgentTicketComposerProps) {
   const [userId, setUserId] = useState('U001')
   const [content, setContent] = useState('')
+  const [mockPrompt, setMockPrompt] = useState('')
+  const [mockDocs, setMockDocs] = useState<KnowledgeDocument[]>([])
+  const [mockSeed, setMockSeed] = useState(0)
+  const [mockLoading, setMockLoading] = useState(false)
   const createMutation = useCreateTicket()
 
   const canSubmit = content.trim().length >= 8 && !createMutation.isPending
@@ -49,9 +56,28 @@ function AgentTicketComposer({ compact = false, onCreated }: AgentTicketComposer
     onCreated?.()
   }
 
-  const loadExample = () => {
-    const next = EXAMPLE_PROMPTS[Math.floor(Math.random() * EXAMPLE_PROMPTS.length)]
-    setContent(next)
+  const refreshMockPrompt = async () => {
+    setMockLoading(true)
+    try {
+      const docs = mockDocs.length > 0
+        ? mockDocs
+        : (await api.getKnowledge({ limit: '20' })).documents
+      setMockDocs(docs)
+      const nextSeed = mockSeed + 1
+      setMockSeed(nextSeed)
+      const next = buildKnowledgeMockTicketPrompt(docs, nextSeed)
+        || EXAMPLE_PROMPTS[nextSeed % EXAMPLE_PROMPTS.length]
+      setMockPrompt(next)
+      setContent(next)
+    } catch {
+      const nextSeed = mockSeed + 1
+      setMockSeed(nextSeed)
+      const fallback = EXAMPLE_PROMPTS[nextSeed % EXAMPLE_PROMPTS.length]
+      setMockPrompt(fallback)
+      setContent(fallback)
+    } finally {
+      setMockLoading(false)
+    }
   }
 
   return (
@@ -74,9 +100,9 @@ function AgentTicketComposer({ compact = false, onCreated }: AgentTicketComposer
               </p>
             </div>
           </div>
-          <Button variant="outline" size="sm" onClick={loadExample} type="button">
+          <Button variant="outline" size="sm" onClick={refreshMockPrompt} type="button" disabled={mockLoading}>
             <Sparkles className="h-3.5 w-3.5" />
-            示例
+            生成问题
           </Button>
         </div>
       )}
@@ -97,9 +123,9 @@ function AgentTicketComposer({ compact = false, onCreated }: AgentTicketComposer
         />
         <div className="flex items-end gap-2 lg:flex-col lg:justify-end">
           {compact && (
-            <Button variant="outline" onClick={loadExample} type="button">
+            <Button variant="outline" onClick={refreshMockPrompt} type="button" disabled={mockLoading}>
               <Sparkles className="h-3.5 w-3.5" />
-              填入示例
+              生成问题
             </Button>
           )}
           <Button onClick={handleSubmit} disabled={!canSubmit} className={compact ? 'min-w-28' : 'min-w-24'}>
@@ -113,12 +139,40 @@ function AgentTicketComposer({ compact = false, onCreated }: AgentTicketComposer
         </div>
       </div>
 
-      <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
-        <span>Agent 将自动生成：</span>
-        <Badge variant="secondary" className="text-[10px]">问题标题</Badge>
-        <Badge variant="secondary" className="text-[10px]">分类</Badge>
-        <Badge variant="secondary" className="text-[10px]">优先级</Badge>
-        <Badge variant="secondary" className="text-[10px]">影响范围</Badge>
+      <div className="mt-3 grid gap-2 lg:grid-cols-[auto_auto_auto_auto_1fr] lg:items-center">
+        <span className="text-[11px] text-muted-foreground">Agent 将自动生成：</span>
+        <Badge variant="secondary" className="w-fit text-[10px]">问题标题</Badge>
+        <Badge variant="secondary" className="w-fit text-[10px]">分类</Badge>
+        <Badge variant="secondary" className="w-fit text-[10px]">优先级</Badge>
+        <div className="flex min-w-0 items-center rounded-md border border-border bg-background/60">
+          <button
+            type="button"
+            onClick={() => mockPrompt && setContent(mockPrompt)}
+            className="min-h-8 flex-1 truncate px-2.5 text-left text-[11px] text-muted-foreground hover:text-foreground"
+            title={mockPrompt || '点击右侧刷新，让 Agent 根据知识库生成一个 mock 问题'}
+          >
+            {mockPrompt || 'Agent 可根据知识库生成一条 mock 问题'}
+          </button>
+          <Tooltip>
+            <TooltipTrigger
+              render={(
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-xs"
+                  className="mr-1"
+                  onClick={refreshMockPrompt}
+                  disabled={mockLoading}
+                />
+              )}
+            >
+              {mockLoading
+                ? <Loader2 className="h-3 w-3 animate-spin" />
+                : <RefreshCw className="h-3 w-3" />}
+            </TooltipTrigger>
+            <TooltipContent>根据知识库换一个问题</TooltipContent>
+          </Tooltip>
+        </div>
       </div>
     </div>
   )
