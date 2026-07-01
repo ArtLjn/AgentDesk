@@ -1,5 +1,3 @@
-# AgentDesk — 基于多智能体协同的智能工单处理系统
-
 ![AgentDesk Banner](output/imagegen/banner.png)
 
 ![Python](https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white)
